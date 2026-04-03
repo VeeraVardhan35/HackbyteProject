@@ -41,6 +41,12 @@ const COPILOT_COMMANDS = {
   "github.copilot.generateDocs.apply": "Copilot Generate Docs",
 };
 
+// Global state variables track the current activity and extension status
+// The outputChannel displays real-time logs and status updates to users
+// Timers manage periodic checks for Copilot activity and log file updates
+// The tool tracking system detects Copilot command patterns within time windows
+// These variables are shared across all event handlers and callback functions
+
 let outputChannel;
 let activationTimer;
 let copilotLogTimer;
@@ -621,3 +627,5 @@ module.exports = {
 //sjdflksajfdlkjsalkfjkal;jjljklkjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjj
 //jsaldjflkasjdfjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjj
 //sdjflkasjflkasjflksjfljsalkfjlsjflsjflksjflkjs
+//jjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjj
+//jjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjj
