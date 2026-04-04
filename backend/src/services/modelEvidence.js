@@ -8,9 +8,10 @@ const firefoxLogPath = path.join(os.homedir(), ".cc-firefox-log.jsonl");
 const MAX_LOG_LINES = 500;
 const RECENT_WINDOW_MS = 24 * 60 * 60 * 1000;
 const HASH_TIME_WINDOW_MS = 60 * 1000;
-const PREVIEW_EVENT_WINDOW_MS = 3 * 60 * 1000;
-const MIN_MEANINGFUL_LINE_LENGTH = 15;
-const MIN_DIFF_LINES_FOR_PERCENTAGE = 3;
+const PREVIEW_EVENT_WINDOW_MS = 60 * 1000;
+const MIN_MEANINGFUL_LINE_LENGTH = 25;
+const MIN_DIFF_LINES_FOR_PERCENTAGE = 5;
+const MIN_COPILOT_MATCHED_LINES = 2;
 
 export async function buildModelEvidenceReceipt(payload = {}) {
   const [vsCodeLog, firefoxLog] = await Promise.all([
@@ -21,8 +22,8 @@ export async function buildModelEvidenceReceipt(payload = {}) {
   const mode = payload.receiptUrl === "preview://working-tree" ? "preview" : "commit";
   const diffText = buildDiffText(payload);
   const diffAnalysis = analyzeDiff(diffText);
-  const evidence = correlateLogs(vsCodeLog, firefoxLog, diffAnalysis, mode);
-  const copilotContribution = buildCopilotContribution(vsCodeLog, diffAnalysis, mode);
+  const evidence = correlateLogs(vsCodeLog, firefoxLog, diffAnalysis, mode, payload.sessionStartedAt);
+  const copilotContribution = buildCopilotContribution(vsCodeLog, diffAnalysis, mode, payload.sessionStartedAt);
 
   return {
     receiptUrl: payload.receiptUrl || null,
@@ -120,9 +121,9 @@ function analyzeDiff(diffText) {
   };
 }
 
-function correlateLogs(vsCodeLog, firefoxLog, diffAnalysis, mode) {
-  const recentVsCodeLog = filterRecentEntries(vsCodeLog, mode);
-  const recentFirefoxLog = filterRecentEntries(firefoxLog, mode);
+function correlateLogs(vsCodeLog, firefoxLog, diffAnalysis, mode, sessionStartedAt) {
+  const recentVsCodeLog = filterRecentEntries(vsCodeLog, mode, sessionStartedAt);
+  const recentFirefoxLog = filterRecentEntries(firefoxLog, mode, sessionStartedAt);
   const firefoxCopies = recentFirefoxLog.filter((entry) => entry.eventType === "copy" || entry.type === "copy");
   const firefoxRequests = firefoxLog.filter(
     (entry) => entry.eventType === "network-request" || entry.eventType === "tab-visit"
@@ -143,7 +144,15 @@ function correlateLogs(vsCodeLog, firefoxLog, diffAnalysis, mode) {
   const copilotCoverage = calculateAiCoverage(
     diffAnalysis.meaningfulChangedLines,
     [...vscodePastes, ...vscodeSuggestions]
-      .filter((entry) => (entry.provider || "").toLowerCase() === "copilot" || isExplicitTool(entry.tool))
+      .filter((entry) => {
+        const provider = String(entry.provider || "").toLowerCase();
+        const tool = String(entry.tool || "");
+        const contentText = String(entry.contentText || "");
+        const lineCount = Number(entry.lineCount || 1);
+        const explicitCopilot = provider === "copilot" || isExplicitTool(tool);
+        const strongInsertion = lineCount >= 2 || normalizeWhitespace(contentText).length >= 40;
+        return explicitCopilot && strongInsertion;
+      })
       .map((entry) => entry.contentText)
       .filter((value) => typeof value === "string" && value.trim())
   );
@@ -215,7 +224,7 @@ function correlateLogs(vsCodeLog, firefoxLog, diffAnalysis, mode) {
     }
   }
 
-  if (copilotCoverage.aiMatchedLines > 0) {
+  if (copilotCoverage.aiMatchedLines >= MIN_COPILOT_MATCHED_LINES) {
     return {
       certainty: "PROBABLE",
       method: "copilot-diff-coverage",
@@ -304,19 +313,24 @@ function calculateAiCoverage(changedLines, snippets) {
 
 function buildContributionSummary(coverage, confidenceLevel, mode) {
   const sampleTooSmall = mode === "preview" && coverage.totalChangedLines < MIN_DIFF_LINES_FOR_PERCENTAGE;
+  const weakCopilotMatch =
+    mode === "preview" &&
+    coverage.aiMatchedLines > 0 &&
+    coverage.aiMatchedLines < MIN_COPILOT_MATCHED_LINES;
+  const strictZero = sampleTooSmall || weakCopilotMatch;
 
   return {
     aiMatchedLines: coverage.aiMatchedLines,
     totalChangedLines: coverage.totalChangedLines,
-    estimatedAiPercentage: sampleTooSmall ? 0 : coverage.estimatedAiPercentage,
-    confidenceLevel: sampleTooSmall ? "LOW" : confidenceLevel,
+    estimatedAiPercentage: strictZero ? 0 : coverage.estimatedAiPercentage,
+    confidenceLevel: strictZero ? "LOW" : confidenceLevel,
     matchedLineSamples: coverage.matchedLines,
-    sampleTooSmall,
+    sampleTooSmall: strictZero,
   };
 }
 
-function buildCopilotContribution(vsCodeLog, diffAnalysis, mode) {
-  const recentVsCodeLog = filterRecentEntries(vsCodeLog, mode);
+function buildCopilotContribution(vsCodeLog, diffAnalysis, mode, sessionStartedAt) {
+  const recentVsCodeLog = filterRecentEntries(vsCodeLog, mode, sessionStartedAt);
   const copilotEntries = recentVsCodeLog.filter((entry) => {
     const provider = String(entry.provider || "").toLowerCase();
     const tool = String(entry.tool || "");
@@ -329,7 +343,11 @@ function buildCopilotContribution(vsCodeLog, diffAnalysis, mode) {
   );
 
   return {
-    ...buildContributionSummary(coverage, coverage.aiMatchedLines > 0 ? "MEDIUM" : "LOW", mode),
+    ...buildContributionSummary(
+      coverage,
+      coverage.aiMatchedLines >= MIN_COPILOT_MATCHED_LINES ? "MEDIUM" : "LOW",
+      mode
+    ),
     eventCount: copilotEntries.length,
   };
 }
@@ -355,12 +373,14 @@ function isMeaningfulLine(line) {
   return true;
 }
 
-function filterRecentEntries(entries, mode) {
+function filterRecentEntries(entries, mode, sessionStartedAt) {
   if (mode !== "preview") {
     return entries;
   }
 
-  const cutoff = Date.now() - PREVIEW_EVENT_WINDOW_MS;
+  const timeWindowCutoff = Date.now() - PREVIEW_EVENT_WINDOW_MS;
+  const sessionCutoff = Date.parse(sessionStartedAt || 0);
+  const cutoff = Number.isNaN(sessionCutoff) ? timeWindowCutoff : Math.max(timeWindowCutoff, sessionCutoff);
   return entries.filter((entry) => {
     const ts = Date.parse(entry.ts || 0);
     return !Number.isNaN(ts) && ts >= cutoff;

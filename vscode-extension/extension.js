@@ -59,6 +59,7 @@ let watchedCopilotLogPath = null;
 let watchedCopilotLogSize = 0;
 const seenCopilotLogLines = new Set();
 const vscodeLogPath = path.join(os.homedir(), ".cc-vscode-log.jsonl");
+const sessionStatePath = path.join(os.homedir(), ".cc-session.json");
 const TOOL_WINDOW_MS = 3000;
 
 // Activates the extension when VS Code loads
@@ -100,6 +101,15 @@ function activate(context) {
       outputChannel.appendLine("Matching installed extensions:");
       outputChannel.appendLine(matches.length ? matches.join("\n") : "No matching extensions found.");
       outputChannel.show(true);
+    })
+  );
+  context.subscriptions.push(
+    vscode.commands.registerCommand("commitConfessional.resetSession", async () => {
+      const resetAt = new Date().toISOString();
+      writeSessionState({ vscodeSessionStartedAt: resetAt });
+      outputChannel.appendLine(`Commit Confessional session reset at ${resetAt}`);
+      outputChannel.show(true);
+      await vscode.window.showInformationMessage("Commit Confessional session baseline reset.");
     })
   );
   const onWillExecuteCommand = vscode.commands.onWillExecuteCommand;
@@ -577,6 +587,14 @@ function appendJsonLine(filePath, payload) {
   }
 }
 
+function writeSessionState(payload) {
+  try {
+    fs.writeFileSync(sessionStatePath, JSON.stringify(payload, null, 2), "utf8");
+  } catch (error) {
+    outputChannel.appendLine(`Session write failed: ${error?.message || String(error)}`);
+  }
+}
+
 function safeRun(label, action) {
   try {
     action();
@@ -629,3 +647,5 @@ module.exports = {
 //sdjflkasjflkasjflksjfljsalkfjlsjflsjflksjflkjs
 //jjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjj
 //jjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjj
+//jjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjj
+//jjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjj

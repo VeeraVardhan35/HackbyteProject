@@ -1,6 +1,10 @@
 const { execFileSync } = require("node:child_process");
+const fs = require("node:fs");
+const os = require("node:os");
+const path = require("node:path");
 
 const backendUrl = process.env.COMMIT_CONFESSIONAL_RECEIPT_URL || "http://127.0.0.1:4000/api/receipt";
+const sessionStatePath = path.join(os.homedir(), ".cc-session.json");
 
 async function main() {
   const stagedDiff = execGit(["diff", "--cached", "--unified=0"]);
@@ -15,6 +19,7 @@ async function main() {
   const payload = {
     diffText,
     receiptUrl: "preview://working-tree",
+    sessionStartedAt: readSessionStartedAt(),
   };
 
   try {
@@ -67,6 +72,15 @@ function execGit(args) {
     cwd: process.cwd(),
     encoding: "utf8",
   });
+}
+
+function readSessionStartedAt() {
+  try {
+    const raw = fs.readFileSync(sessionStatePath, "utf8");
+    return JSON.parse(raw).vscodeSessionStartedAt || null;
+  } catch {
+    return null;
+  }
 }
 
 main();
