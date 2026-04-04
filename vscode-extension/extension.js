@@ -1,8 +1,3 @@
-// This VS Code extension module provides the main entry point for the Commit Confessional detector.
-// It imports necessary Node.js modules for file system operations, path handling, and cryptography.
-// The extension uses VS Code's API to register commands and listen for editor events.
-// All module dependencies are imported at the top to ensure they're available throughout the extension.
-// The extension is designed to be lightweight and performant with minimal overhead on VS Code.
 
 const vscode = require("vscode");
 const fs = require("node:fs");
@@ -10,22 +5,14 @@ const os = require("node:os");
 const path = require("node:path");
 const crypto = require("node:crypto");
 
-// This extension tracks Copilot-related command usage in VS Code.
-// It listens for command execution and text document changes,
-// then logs events to a local JSONL file for later inspection.
-// The detector is designed to identify Copilot inline suggestions,
-// paste-like insertions, and AI extension activation behavior.
-// This is intended for diagnostics and awareness, not for data exfiltration.
-// The module keeps a lightweight output channel updated with status,
-// and uses timers to periodically poll extension activation and logs.
-// Most logic is wrapped in safeRun() to prevent one failure from
-// disabling the whole extension host integration.
-// The command map is used to convert internal command IDs to readable labels.
 
 const COPILOT_COMMANDS = {
   "editor.action.inlineSuggest.commit": "Inline Suggestion",
   "editor.action.inlineSuggest.acceptNextLine": "Inline Suggestion (Next Line)",
   "editor.action.inlineSuggest.acceptNextWord": "Inline Suggestion (Next Word)",
+  "acceptSelectedSuggestion": "Suggestion Widget Accept",
+  "editor.action.acceptSuggestion": "Suggestion Widget Accept",
+  "editor.action.acceptSelectedSuggestion": "Suggestion Widget Accept",
   "github.copilot.chat.inlineChat.start": "Inline Chat",
   "github.copilot.chat.inlineChat.accept": "Inline Chat (Accepted)",
   "github.copilot.chat.inlineChat.discard": "Inline Chat (Discarded)",
@@ -39,13 +26,15 @@ const COPILOT_COMMANDS = {
   "github.copilot.fixes.apply": "Copilot Fix",
   "github.copilot.generateTests.apply": "Copilot Generate Tests",
   "github.copilot.generateDocs.apply": "Copilot Generate Docs",
+  "openai.codex.generate": "Codex Generate",
+  "openai.codex.apply": "Codex Apply",
+  "openai.codex.accept": "Codex Accept",
+  "openai.codex.insertAtCursor": "Codex Insert at Cursor",
+  "openai.codex.insertIntoNewFile": "Codex Insert New File",
+  "openai.codex.chat.applyInEditor": "Codex Chat Apply in Editor",
+  "openai.codex.edits.apply": "Codex Edits",
+  "openai.codex.inline.accept": "Codex Inline Accept",
 };
-
-// Global state variables track the current activity and extension status
-// The outputChannel displays real-time logs and status updates to users
-// Timers manage periodic checks for Copilot activity and log file updates
-// The tool tracking system detects Copilot command patterns within time windows
-// These variables are shared across all event handlers and callback functions
 
 let outputChannel;
 let activationTimer;
@@ -62,11 +51,6 @@ const vscodeLogPath = path.join(os.homedir(), ".cc-vscode-log.jsonl");
 const sessionStatePath = path.join(os.homedir(), ".cc-session.json");
 const TOOL_WINDOW_MS = 3000;
 
-// Activates the extension when VS Code loads
-// Sets up the output channel for logging events and user notifications
-// Registers command handlers for inspecting extensions and viewing logs
-// Establishes watchers for command execution and document changes
-// Initializes timers to monitor Copilot activity periodically
 function activate(context) {
   outputChannel = vscode.window.createOutputChannel("Commit Confessional");
   outputChannel.appendLine("Commit Confessional detector started.");
@@ -129,7 +113,7 @@ function activate(context) {
             ts: new Date().toISOString(),
             label: "copilot-command",
             source: "copilot-command",
-            provider: "copilot",
+            provider: detectProviderFromCommand(commandName, toolName),
             command: commandName,
             tool: toolName,
           });
@@ -148,6 +132,7 @@ function activate(context) {
     })
   );
 
+  // Start periodic monitoring timers to track AI extension activation and Copilot command logs
   activationTimer = setInterval(() => {
     void pollAiExtensionActivation();
   }, 2000);
@@ -171,6 +156,7 @@ function activate(context) {
 }
 
 function deactivate() {
+
   if (activationTimer) {
     clearInterval(activationTimer);
   }
@@ -178,7 +164,6 @@ function deactivate() {
     clearInterval(copilotLogTimer);
   }
 }
-
 async function handleDocumentChange(event) {
   if (!event?.contentChanges?.length) {
     return;
@@ -199,6 +184,7 @@ async function handleDocumentChange(event) {
   const promptPreview = buildPreview(insertedText);
   const isPromptLike = insertedText.trim().length >= 20 && /[?]|review|explain|fix|generate|write|debug|refactor/i.test(insertedText);
   const looksTyped = insertedText.length === 1 && !insertedText.includes("\n");
+  const normalizedInsertedText = normalizeWhitespace(insertedText);
   const isNonTrivialInsertion = insertedText.length > 20 || insertedText.includes("\n");
 
   if (isPromptLike) {
@@ -219,7 +205,14 @@ async function handleDocumentChange(event) {
   const clipboardText = await readClipboardSafe();
   const isPaste = detectPaste(insertedText, clipboardText);
   const activeTool = currentTool();
-  const inferredSource = classifyInsertionSource(insertedText, now, isPaste, activeTool, isNonTrivialInsertion);
+  const inferredSource = classifyInsertionSource(
+    insertedText,
+    now,
+    isPaste,
+    activeTool,
+    isNonTrivialInsertion,
+    normalizedInsertedText
+  );
   const contentHash = hashContent(isPaste ? clipboardText : insertedText);
 
   if (inferredSource === "typed") {
@@ -238,7 +231,7 @@ async function handleDocumentChange(event) {
 
   await emitEvent(inferredSource === "paste-event" ? "paste-detected" : "inline-suggestion", {
     appName: "vscode",
-    provider: inferredSource === "inline-suggestion" ? "copilot" : "editor",
+    provider: inferredSource === "inline-suggestion" ? detectProviderFromTool(activeTool) : "editor",
     extensionId: "vscode.editor",
     documentPath,
     method: inferredSource === "inline-suggestion" ? "SUGGESTION" : "PASTE",
@@ -251,6 +244,7 @@ async function handleDocumentChange(event) {
     tool: activeTool,
   });
 }
+
 
 async function pollAiExtensionActivation(initial = false) {
   const now = Date.now();
@@ -287,6 +281,8 @@ async function pollAiExtensionActivation(initial = false) {
   }
 }
 
+// Core event emission function that logs all detected activities (commands, insertions, activations)
+// Writes events to both the output channel for real-time user visibility and to the JSONL log file
 async function emitEvent(label, payload) {
   const line = `[${new Date().toISOString()}] ${label}: ${payload.extensionId || payload.provider} ${payload.promptPreview || ""}`.trim();
   outputChannel.appendLine(line);
@@ -345,6 +341,19 @@ function detectProviderFromExtensionId(extensionId) {
   if (value.includes("codex")) return "codex";
   if (value.includes("openai") || value.includes("chatgpt")) return "openai";
   return "unknown";
+}
+
+function detectProviderFromCommand(commandName, toolName) {
+  const commandValue = String(commandName || "").toLowerCase();
+  const toolValue = String(toolName || "").toLowerCase();
+  if (commandValue.includes("codex") || toolValue.includes("codex")) return "codex";
+  if (commandValue.includes("copilot") || toolValue.includes("copilot")) return "copilot";
+  if (commandValue.includes("openai") || toolValue.includes("openai")) return "openai";
+  return "unknown";
+}
+
+function detectProviderFromTool(toolName) {
+  return detectProviderFromCommand("", toolName);
 }
 
 function detectPaste(insertedText, clipboardText) {
@@ -558,12 +567,15 @@ function extractModelHint(line) {
   return null;
 }
 
-function classifyInsertionSource(insertedText, now, isPaste, activeTool, isNonTrivialInsertion) {
+function classifyInsertionSource(insertedText, now, isPaste, activeTool, isNonTrivialInsertion, normalizedInsertedText) {
   if (isPaste) {
     return "paste-event";
   }
 
-  if (activeTool !== "Human / Unknown" && isNonTrivialInsertion) {
+  if (
+    activeTool !== "Human / Unknown" &&
+    (isNonTrivialInsertion || normalizedInsertedText.length >= 8)
+  ) {
     return "inline-suggestion";
   }
 
@@ -649,3 +661,7 @@ module.exports = {
 //jjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjj
 //jjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjj
 //jjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjj
+//jjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjj
+//jjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjj
+//jjjjjjjjjjjjjjjjjjjjjjj
+//jjjjjjjjjjjjjjjjjj
