@@ -1,0 +1,21 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" fill="none">
+  <defs>
+    <linearGradient id="core" x1="22" y1="18" x2="102" y2="108" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#6cf2ff"/>
+      <stop offset="0.55" stop-color="#4cb8ff"/>
+      <stop offset="1" stop-color="#97ffba"/>
+    </linearGradient>
+    <linearGradient id="pulse" x1="32" y1="28" x2="98" y2="102" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#fef7c8"/>
+      <stop offset="1" stop-color="#84ffd4"/>
+    </linearGradient>
+  </defs>
+  <rect x="18" y="16" width="92" height="96" rx="24" fill="#09141f"/>
+  <rect x="18" y="16" width="92" height="96" rx="24" stroke="url(#core)" stroke-width="8"/>
+  <path d="M42 42h22c15.464 0 28 12.536 28 28s-12.536 28-28 28H42V42Z" fill="url(#core)" opacity="0.18"/>
+  <path d="M44 43.5h16.5c14.635 0 26.5 11.865 26.5 26.5S75.135 96.5 60.5 96.5H44V43.5Z" stroke="url(#core)" stroke-width="7" stroke-linejoin="round"/>
+  <path d="M56 54h17" stroke="url(#pulse)" stroke-width="7" stroke-linecap="round"/>
+  <path d="M56 70h25" stroke="url(#pulse)" stroke-width="7" stroke-linecap="round"/>
+  <path d="M56 86h14" stroke="url(#pulse)" stroke-width="7" stroke-linecap="round"/>
+  <circle cx="91" cy="36" r="7" fill="#f8c86f"/>
+</svg>

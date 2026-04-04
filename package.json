@@ -1,0 +1,32 @@
+{
+  "name": "commit-confessional",
+  "private": true,
+  "version": "0.1.0",
+  "workspaces": [
+    "backend",
+    "frontend"
+  ],
+  "scripts": {
+    "dev": "npm run dev --workspace backend",
+    "dev:backend": "npm run dev --workspace backend",
+    "dev:frontend": "npm run dev --workspace frontend",
+    "preview": "node scripts/preview-receipt.js",
+    "preview:extension": "node scripts/preview-extension.mjs",
+    "watch:extension": "node scripts/watch-extension.mjs",
+    "package:extension": "npm run package:vsix --prefix vscode-extension",
+    "publish:extension": "npm run publish:marketplace --prefix vscode-extension",
+    "publish:extension:openvsx": "npm run publish:openvsx --prefix vscode-extension",
+    "dev:narrator": "node scripts/run-merged-dev.mjs narrator",
+    "dev:narrator:backend": "npm run dev --prefix living-codebase-narrator/living-codebase-narrator/living-codebase-narrator/apps/backend",
+    "dev:narrator:web": "npm run dev --prefix living-codebase-narrator/living-codebase-narrator/living-codebase-narrator/apps/web",
+    "dev:all": "node scripts/run-merged-dev.mjs all",
+    "build": "npm run build --workspace frontend",
+    "build:narrator:web": "npm run build --prefix living-codebase-narrator/living-codebase-narrator/living-codebase-narrator/apps/web",
+    "install:firefox-native": "node firefox-extension/install-native-host.js",
+    "receipt:post-commit": "node scripts/post-commit-receipt.js",
+    "receipt:preview": "node scripts/preview-receipt.js",
+    "preview:ai": "node scripts/preview-receipt.js",
+    "test:latest-receipt": "node scripts/post-commit-receipt.js",
+    "security:audit:deps": "npm audit --json && npm audit --json --prefix living-codebase-narrator/living-codebase-narrator/living-codebase-narrator"
+  }
+}

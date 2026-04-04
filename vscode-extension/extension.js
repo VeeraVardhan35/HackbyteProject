@@ -1,0 +1,2465 @@
+// === VS Code Extension: Hackbyte Code Narrator ===
+// Tracks Copilot usage, AI tool interactions, and generates live code documentation.
+// Features: code diff tracking, AI event logging, inline documentation, receipt generation.
+//
+// Why did the AI go to therapy? It had too many issues to commit.
+// When the therapist asked about its problems, it said, "I have merge conflicts with myself."
+// The therapist replied, "That's nothing—you should see what my git history looks like."
+//
+// How many developers does it take to change a Copilot bug?
+// None—that's a Copilot problem, not our problem.
+// But seriously, if Copilot writes a bug, does it count as code review?
+// Only if the code reviews itself and says "Ship it!" 🚀
+// Why do developers prefer dark mode? Because light attracts bugs! 🐛
+// A SQL query walks into a bar, walks up to two tables and asks: "Can I join you?" 🍻
+//
+// Story line 1: The repo woke before sunrise, waiting for the next commit.
+// Story line 2: A silent cursor blinked like a lighthouse for lost ideas.
+// Story line 3: In the logs, yesterday's errors finally learned their names.
+// Story line 4: The branch forked, two paths sharing one memory.
+// Story line 5: Tests marched in green uniforms, guarding the build gate.
+// Story line 6: A diff whispered what had changed, line by line.
+// Story line 7: The debugger listened, patient as a midnight rain.
+// Story line 8: A small refactor folded chaos into a cleaner file.
+// Story line 9: The commit message told the truth, short and steady.
+// Story line 10: And the merge, for once, felt like coming home.
+//
+// Story line 11: Monday arrived with new requirements written on sticky notes.
+// Story line 12: The terminal executed commands like prayers whispered to the machine.
+// Story line 13: Each semicolon was a period, ending a thought in code.
+// Story line 14: Variables held memories, functions held logic, classes held purpose.
+// Story line 15: The server hummed, a gentle background song of persistence.
+// Story line 16: Errors weren't failures; they were conversations with the unknown.
+// Story line 17: A developer's hands learned the keyboard like a musician learns an instrument.
+// Story line 18: Time slipped between functions, hours became minutes in the flow state.
+// Story line 19: The code review came like a mirror, showing what was missed in pride.
+// Story line 20: And when the deployment succeeded, somewhere a coffee cup was raised in silence.
+//
+// === Extension Overview ===
+// This extension monitors developer activity and AI tool interactions in real-time.
+// It tracks coding patterns, detects AI-assisted code changes, and logs all events.
+// The extension maintains a persistent log for analytics and code documentation.
+// Features support both inline suggestions and interactive chat with language models.
+// All data is securely logged and processed for developer insights and analytics.
+//
+// === Session Analytics ===
+// Tracks newly added lines per file and maintains session statistics for code metrics.
+// Enables developers to monitor productivity and code generation patterns in real-time.
+// Integration with preview receipts provides comprehensive AI-assisted coding insights.
+
+//
+//ajjjjjjjjjjjjjjjjjjjjjj
+//jsldfkjskljfklsjfklsfsj
+//sdjflksjfklsjjjjjjjjjj
+//d
+//d
+const vscode = require("vscode");
+const { execFile } = require("node:child_process");
+const fs = require("node:fs");
+const os = require("node:os");
+const path = require("node:path");
+const crypto = require("node:crypto");
+const { loadProjectEnv } = require("../scripts/env-loader.cjs");
+
+loadProjectEnv(path.resolve(__dirname, ".."));
+
+// Configuration and Constants
+const LOG_PATH = path.join(os.homedir(), ".cc-vscode-log.jsonl"); // Local event log file path
+const TOOL_WINDOW_MS = 12000; // Time window to identify recent tool usage
+const COPILOT_LOG_WINDOW_MS = 20000; // Time window for Copilot log activity detection
+const COPILOT_RECENT_ACTIVITY_WINDOW_MS = 30000; // Wider fallback window for delayed Copilot edit batches
+const DEFAULT_SESSION_ID = "local-dev"; // Default session identifier
+const AI_TAG_WINDOW_MS = 60 * 60 * 1000; // Keep recent AI insertions for tag propagation
+const AI_DETECTOR_FILE = ".aidetector.json"; // Persistent store for file AI lineage
+const AI_DETECTOR_VERSION = 1;
+const AI_FUZZY_MATCH_THRESHOLD = 0.6;
+const REPO_DISCOVERY_MAX_DEPTH = 2;
+const UNTRACKED_PREVIEW_MAX_BYTES = 256 * 1024;
+const RECENT_AI_LOG_SCAN_LINES = 2500;
+const DEFAULT_FRONTEND_URL = "http://localhost:5173";
+const DEFAULT_SENSITIVE_FILE_GLOBS = [
+  "**/.env",
+  "**/.env.*",
+  "**/*.pem",
+  "**/*.key",
+  "**/*.p12",
+  "**/*.pfx",
+  "**/id_rsa",
+  "**/id_dsa",
+  "**/id_ecdsa",
+  "**/id_ed25519",
+  "**/*.crt",
+  "**/*.cer",
+];
+// Map of VS Code command IDs to user-friendly tool names
+const COPILOT_COMMANDS = {
+  "editor.action.inlineSuggest.commit": "Inline Suggestion",
+  "editor.action.inlineSuggest.acceptNextLine": "Inline Suggestion (Next Line)",
+  "editor.action.inlineSuggest.acceptNextWord": "Inline Suggestion (Next Word)",
+  "github.copilot.chat.inlineChat.start": "Inline Chat",
+  "github.copilot.chat.inlineChat.accept": "Inline Chat (Accepted)",
+  "github.copilot.edits.apply": "Copilot Edits",
+  "github.copilot.edits.accept": "Copilot Edits (Accepted)",
+  "github.copilot.chat.applyInEditor": "Chat -> Apply in Editor",
+  "github.copilot.chat.acceptChanges": "Chat Accept Changes",
+  "github.copilot.chat.insertAtCursor": "Chat -> Insert at Cursor",
+  "github.copilot.fixes.apply": "Copilot Fix",
+  "github.copilot.generateTests.apply": "Copilot Generate Tests",
+  "github.copilot.generateDocs.apply": "Copilot Generate Docs",
+  "vscode.editorChat.accept": "Editor Chat (Accepted)",
+  "vscode.editorChat.acceptChanges": "Editor Chat Accept Changes",
+  "workbench.action.chat.applyInEditor": "Chat -> Apply in Editor",
+};
+
+// Output and State Management
+let outputChannel; // VS Code output channel for logging
+let activationTimer; // Timer for polling AI extension activation
+let copilotLogTimer; // Timer for polling Copilot logs
+let pendingTool = null; // Most recently detected AI tool
+let pendingToolTime = 0; // Timestamp of last tool detection
+let lastCopilotLogActivityAt = 0; // Timestamp of last Copilot log activity
+let lastDetectedModel = null; // Latest model name seen in Copilot logs
+let lastPromptContext = null; // Recent user input context (paste/suggestion)
+let watchedCopilotLogPath = null; // Path to currently monitored Copilot log file
+let watchedCopilotLogSize = 0; // Current read position in Copilot log
+let commitPollTimer; // Timer for polling repository commits
+const commitReceiptBootstrap = new Set();
+let totalNewlyAddedLines = 0; // Track total newly added lines count
+let totalCopilotLogDetectedLines = 0; // Track Copilot completion lines extracted from logs
+let totalCopilotLogEvents = 0; // Track Copilot completion events extracted from logs
+let totalHumanManualDetectedLines = 0; // Track human-origin inserted lines for the current commit session
+let githubAuthPrompted = false; // Avoid repeated OAuth prompts every activation cycle
+
+// Data structures for tracking state
+const extensionStates = new Map(); // Track AI extension activation state
+const seenCopilotLogLines = new Set(); // Prevent duplicate log line processing
+const narratorSnapshots = new Map(); // Store previous file content for diff generation
+const narratorPending = new Map(); // Queue pending narrator delta documents
+const repoHeads = new Map(); // Track git HEAD for each repository
+const pendingAiInsertions = new Map(); // Recent AI-origin insertions keyed by file path
+const pendingHumanInsertions = new Map(); // Recent human-origin insertions keyed by file path
+const addedLinesPerSession = new Map(); // Track added lines per file during session
+
+// === Sidebar UI Provider ===
+// Manages the webview sidebar that displays live code documentation and narrator snapshots
+class SidebarProvider {
+  static viewType = "lcn.sidebar"; // Unique identifier for this webview
+
+  constructor(context) {
+    this.context = context; // Extension context for subscriptions
+    this.view = undefined; // Webview instance reference
+    this.lastDocsJson = "[]"; // Cache to detect documentation changes
+    this.pollTimer = undefined; // Timer for polling backend docs
+  }
+
+  // Initialize webview when sidebar panel is created
+  resolveWebviewView(view) {
+    this.view = view;
+    view.webview.options = { enableScripts: true }; // Enable JavaScript in webview
+    view.webview.html = this.renderHtml(view.webview); // Render UI with CSP headers
+    // Handle messages from webview (file opens, votes)
+    view.webview.onDidReceiveMessage(async (msg) => {
+      if (msg?.type === "openFile" && typeof msg.filePath === "string") {
+        try {
+          const doc = await vscode.workspace.openTextDocument(vscode.Uri.file(msg.filePath));
+          await vscode.window.showTextDocument(doc, { preview: true });
+        } catch (error) {
+          log(`openFile failed: ${error?.message || String(error)}`);
+        }
+      }
+      if (
+        msg?.type === "vote" &&
+        typeof msg.id === "string" &&
+        (msg.direction === "up" || msg.direction === "down")
+      ) {
+        const cfg = getNarratorConfig();
+        try {
+          await fetchJson(`${trimSlash(cfg.backendUrl)}/docs/${msg.id}/vote`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ direction: msg.direction }),
+          });
+        } catch (error) {
+          log(`vote failed: ${error?.message || String(error)}`);
+        }
+      }
+    });
+    this.startPolling();
+  }
+
+  notifyDocs(docs) {
+    this.lastDocsJson = JSON.stringify(docs);
+    this.view?.webview.postMessage({ type: "docs", docs });
+  }
+
+  startPolling() {
+    const poll = async () => {
+      const cfg = getNarratorConfig();
+      try {
+        const payload = await fetchJson(`${trimSlash(cfg.backendUrl)}/docs?limit=25`);
+        const docs = Array.isArray(payload.docs) ? payload.docs : [];
+        const next = JSON.stringify(docs);
+        if (next !== this.lastDocsJson) {
+          this.lastDocsJson = next;
+          this.view?.webview.postMessage({ type: "docs", docs });
+        }
+      } catch {}
+    };
+    void poll();
+    this.pollTimer = setInterval(() => void poll(), 1500);
+    this.context.subscriptions.push({ dispose: () => this.pollTimer && clearInterval(this.pollTimer) });
+  }
+
+//dfsldfjlskdjflksdjflksjf
+
+
+  renderHtml(webview) {
+    const nonce = crypto.randomBytes(16).toString("base64");
+    return `<!doctype html><html><head>
+      <meta charset="utf-8"/>
+      <meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src ${webview.cspSource} data:; style-src ${webview.cspSource} 'unsafe-inline'; script-src 'nonce-${nonce}'; connect-src http: https:;">
+      <style>
+        :root{
+          --bg0:#181825;--bg1:#1e1e2e;--bg2:#232634;--bg3:#313244;--line:#45475a;
+          --text:#cdd6f4;--muted:#6c7086;--green:#a6e3a1;--blue:#89b4fa;--mauve:#cba6f7;--yellow:#fab387;--pink:#f38ba8;
+        }
+        *{box-sizing:border-box}
+        body{margin:0;background:var(--bg0);color:var(--text);font:12px var(--vscode-font-family)}
+        .shell{display:grid;grid-template-rows:auto auto 1fr auto;height:100vh;background:linear-gradient(180deg,rgba(137,180,250,.04),transparent 30%),var(--bg0)}
+        .titlebar{display:flex;align-items:center;gap:8px;padding:8px 12px;border-bottom:1px solid var(--line);background:rgba(24,24,37,.96)}
+        .dot{width:9px;height:9px;border-radius:50%}.d1{background:#ff5f57}.d2{background:#febc2e}.d3{background:#28c840}
+        .titlemeta{min-width:0}
+        .appname{font-size:11px;font-weight:600;color:var(--text)}
+        .apptag{font-size:10px;color:var(--muted)}
+        .status{margin-left:auto;display:flex;align-items:center;gap:8px;font-size:10px;color:var(--green)}
+        .live-dot{width:6px;height:6px;border-radius:50%;background:var(--green);box-shadow:0 0 12px rgba(166,227,161,.65)}
+        .tabbar{display:flex;align-items:center;border-bottom:1px solid var(--line);background:var(--bg0)}
+        .tab{padding:7px 12px;font-size:10px;color:var(--muted);border-right:1px solid var(--line);cursor:pointer}
+        .tab.active{color:var(--text);background:var(--bg1);border-top:1px solid var(--blue)}
+        .panel{display:none;height:100%;overflow:auto}
+        .panel.active{display:block}
+        .frame{display:grid;grid-template-columns:150px 1fr;height:100%}
+        .explorer{border-right:1px solid var(--line);background:rgba(24,24,37,.8);padding:8px 0}
+        .explabel{padding:0 12px 6px;font-size:9px;letter-spacing:.08em;color:var(--muted);text-transform:uppercase}
+        .file{display:flex;align-items:center;gap:6px;padding:5px 12px;color:var(--muted);cursor:pointer;font-size:10px}
+        .file.active,.file:hover{background:var(--bg3);color:var(--text)}
+        .editor{padding:12px;background:var(--bg1)}
+        .editor-meta{display:flex;align-items:center;justify-content:space-between;margin-bottom:8px;font-size:10px;color:var(--muted)}
+        .editor-chip{padding:2px 7px;border-radius:999px;border:1px solid var(--line);background:rgba(137,180,250,.08);color:var(--blue)}
+        pre{margin:0;white-space:pre-wrap;word-break:break-word;border:1px solid var(--line);border-radius:8px;background:#171722;padding:12px;color:var(--text);line-height:1.55}
+        .docs-wrap{padding:10px;display:flex;flex-direction:column;gap:8px}
+        .voicebar{display:flex;align-items:center;gap:8px;border:1px solid var(--line);border-radius:8px;background:var(--bg1);padding:8px 10px}
+        .vwave{display:flex;align-items:flex-end;gap:2px;height:16px}
+        .vbar{width:3px;border-radius:999px;background:var(--mauve);animation:wave var(--d,.45s) ease-in-out infinite alternate}
+        @keyframes wave{from{height:3px}to{height:14px}}
+        .vtxt{font-size:10px;color:var(--green);line-height:1.4}
+        .card{border:1px solid var(--line);border-radius:8px;background:var(--bg1);padding:10px}
+        .card.new{border-color:var(--blue);box-shadow:0 0 0 1px rgba(137,180,250,.2) inset}
+        .meta{display:flex;align-items:center;gap:6px;margin-bottom:6px}
+        .avatar{width:18px;height:18px;border-radius:50%;display:flex;align-items:center;justify-content:center;background:var(--bg3);color:var(--mauve);font-size:8px;font-weight:700}
+        .name{font-size:10px;color:var(--blue)}
+        .time{margin-left:auto;font-size:9px;color:var(--muted)}
+        .fileline{font-size:9px;color:var(--yellow);margin-bottom:5px}
+        .summary{font-size:11px;line-height:1.55;color:var(--text)}
+        .tags{display:flex;gap:5px;flex-wrap:wrap;margin-top:7px}
+        .tag{padding:2px 6px;border-radius:999px;font-size:9px}
+        .tag.pur{background:#2a1f3d;color:var(--mauve)}
+        .tag.grn{background:#1a2f1a;color:var(--green)}
+        .actions{display:flex;align-items:center;gap:6px;margin-top:8px;padding-top:8px;border-top:1px solid var(--line)}
+        .btn{border:1px solid var(--line);border-radius:5px;background:transparent;color:var(--muted);padding:3px 8px;font-size:9px;cursor:pointer}
+        .btn.good{border-color:rgba(166,227,161,.35);color:var(--green)}
+        .btn.bad{border-color:rgba(243,139,168,.35);color:var(--pink)}
+        .empty{padding:14px;border:1px dashed var(--line);border-radius:8px;color:var(--muted);font-size:11px;background:rgba(30,30,46,.55)}
+        .statusbar{display:flex;align-items:center;gap:10px;padding:6px 10px;border-top:1px solid var(--line);background:var(--bg3);font-size:9px;color:var(--muted)}
+        .statusbar .ok{color:var(--green)}
+        .statusbar .strong{color:var(--text)}
+      </style></head><body>
+      <div class="shell">
+        <div class="titlebar">
+          <div class="dot d1"></div><div class="dot d2"></div><div class="dot d3"></div>
+          <div class="titlemeta">
+            <div class="appname">Hackbyte Narrator</div>
+            <div class="apptag">merged detector + live docs</div>
+          </div>
+          <div class="status"><div class="live-dot"></div><span>live</span></div>
+        </div>
+        <div class="tabbar">
+          <div class="tab" data-tab="explorer">Explorer</div>
+          <div class="tab" data-tab="editor">Editor</div>
+          <div class="tab active" data-tab="docs">Live Docs</div>
+        </div>
+        <div id="explorer" class="panel"></div>
+        <div id="editor" class="panel"></div>
+        <div id="docs" class="panel active"></div>
+        <div class="statusbar">
+          <span class="ok">SpacetimeDB ready</span>
+          <span class="strong">VS Code extension active</span>
+          <span id="doc-count">0 docs</span>
+          <span style="margin-left:auto" id="active-file">waiting for save</span>
+        </div>
+      </div>
+      <script nonce="${nonce}">
+        const vscode = acquireVsCodeApi(); let docs = []; let active = "docs"; const votes = new Map();
+        const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;" }[c]));
+        const tail = (s) => { s = String(s || ""); const i = Math.max(s.lastIndexOf("/"), s.lastIndexOf(String.fromCharCode(92))); return i >= 0 ? s.slice(i + 1) : s; };
+        const initials = (s) => String(s || "?").split(/\\s+/).filter(Boolean).slice(0, 2).map((p) => p[0]?.toUpperCase() || "").join("");
+        const relTime = (value) => { if(!value) return "just now"; const date = new Date(value); if(Number.isNaN(date.getTime())) return String(value); const diff = Math.max(0, Math.round((Date.now() - date.getTime()) / 60000)); if(diff < 1) return "just now"; if(diff < 60) return diff + " min ago"; if(diff < 1440) return Math.round(diff / 60) + " hr ago"; return Math.round(diff / 1440) + " d ago"; };
+        const tagTone = (index) => index % 2 === 0 ? "pur" : "grn";
+        function setTab(name){ active = name; document.querySelectorAll(".tab").forEach((b)=>b.classList.toggle("active", b.dataset.tab===name)); document.querySelectorAll(".panel").forEach((p)=>p.classList.toggle("active", p.id===name)); }
+        function render(){
+          const files = [...new Set(docs.map((d)=>d.filePath).filter(Boolean))];
+          const latest = docs[0];
+          document.getElementById("doc-count").textContent = docs.length + " docs";
+          document.getElementById("active-file").textContent = latest?.filePath ? tail(latest.filePath) : "waiting for save";
+          document.getElementById("explorer").innerHTML = '<div class="frame"><div class="explorer"><div class="explabel">Explorer</div>' + (files.map((fp, index)=>'<div class="file'+(index===0?' active':'')+'" data-fp="'+esc(fp)+'">'+esc(tail(fp))+'</div>').join("") || '<div class="empty" style="margin:0 10px">No docs yet</div>') + '</div><div class="editor"><div class="editor-meta"><span>Tracked files</span><span class="editor-chip">'+files.length+' items</span></div><pre>' + esc(files.join("\\n") || "Save a file to populate explorer state.") + '</pre></div></div>';
+          document.querySelectorAll(".file").forEach((el)=>el.onclick=()=>vscode.postMessage({type:"openFile", filePath:el.dataset.fp}));
+          document.getElementById("editor").innerHTML = latest ? '<div class="frame"><div class="explorer"><div class="explabel">Context</div><div class="file active">'+esc(tail(latest.filePath || "unknown"))+'</div><div class="file">'+esc(latest.language || "text")+'</div><div class="file">'+esc(relTime(latest.createdAt))+'</div></div><div class="editor"><div class="editor-meta"><span>'+esc(latest.language || "text")+'</span><span class="editor-chip">'+esc(tail(latest.filePath || "unknown"))+'</span></div><pre>'+esc(latest.diff || "")+'</pre></div></div>' : '<div class="docs-wrap"><div class="empty">Save a file to generate a diff.</div></div>';
+          document.getElementById("docs").innerHTML = '<div class="docs-wrap"><div class="voicebar"><div class="vwave"><div class="vbar" style="--d:.35s"></div><div class="vbar" style="--d:.5s"></div><div class="vbar" style="--d:.25s"></div><div class="vbar" style="--d:.45s"></div><div class="vbar" style="--d:.3s"></div></div><div class="vtxt">' + esc(latest?.summary || "Waiting for the next narrated code update...") + '</div></div>' + (docs.map((d, index)=>'<div class="card'+(index===0?' new':'')+'"><div class="meta"><div class="avatar">'+esc(initials(d.author || "dev"))+'</div><div class="name">'+esc(d.author || "Developer")+'</div><div class="time">'+esc(relTime(d.createdAt))+'</div></div><div class="fileline">'+esc(tail(d.filePath || "unknown"))+' | '+esc(d.language || "text")+'</div><div class="summary">'+esc(d.summary || "")+'</div><div class="tags">'+((d.tags||[]).map((t, tagIndex)=>'<span class="tag '+tagTone(tagIndex)+'">#'+esc(t)+'</span>').join(""))+'</div><div class="actions"><span style="font-size:9px;color:var(--muted)">Accurate?</span><button class="btn good" data-id="'+esc(d.id)+'" data-dir="up">thumbs up</button><button class="btn bad" data-id="'+esc(d.id)+'" data-dir="down">flag</button></div></div>').join("") || '<div class="empty">Waiting for live docs.</div>') + '</div>';
+          document.querySelectorAll(".btn[data-id]").forEach((el)=>el.onclick=()=>vscode.postMessage({type:"vote", id:el.dataset.id, direction:el.dataset.dir}));
+        }
+        window.addEventListener("message",(e)=>{ if(e.data?.type==="docs"){ docs = Array.isArray(e.data.docs) ? e.data.docs : []; render(); } });
+        document.querySelectorAll(".tab").forEach((b)=>b.onclick=()=>setTab(b.dataset.tab)); render();
+      </script></body></html>`;
+  }
+}
+
+// === Extension Activation ===
+// Entry point when extension is loaded by VS Code
+function activate(context) {
+  outputChannel = vscode.window.createOutputChannel("Hackbyte Code Narrator");
+  const sidebar = new SidebarProvider(context);
+  context.subscriptions.push(outputChannel);
+  context.subscriptions.push(vscode.window.registerWebviewViewProvider(SidebarProvider.viewType, sidebar));
+
+  // Register all commands and event listeners
+  registerCommands(context);
+  registerListeners(context, sidebar);
+
+  // Start background polling timers for monitoring AI events
+  activationTimer = setInterval(() => void pollAiExtensionActivation(), 2000); // Poll AI extension state every 2s
+  copilotLogTimer = setInterval(() => void pollCopilotLogs(), 3000); // Poll Copilot logs every 3s
+  commitPollTimer = setInterval(() => void pollWorkspaceCommits(), 12000); // Poll commits every 12s
+  // Cleanup timers on deactivation
+  context.subscriptions.push({
+    dispose() {
+      if (activationTimer) clearInterval(activationTimer);
+      if (copilotLogTimer) clearInterval(copilotLogTimer);
+      if (commitPollTimer) clearInterval(commitPollTimer);
+      for (const item of narratorPending.values()) clearTimeout(item.timer);
+    },
+  });
+
+  for (const doc of vscode.workspace.textDocuments) {
+    if (doc.uri.scheme === "file" && !doc.isUntitled) {
+      narratorSnapshots.set(doc.uri.fsPath, { text: doc.getText(), version: doc.version });
+    }
+  }
+
+  log("Merged VS Code extension started.");
+  void pollAiExtensionActivation(true);
+  void pollCopilotLogs(true);
+  void pollWorkspaceCommits(true);
+  void promptGithubAuthIfNeeded();
+}
+
+// === Extension Deactivation ===
+// Cleanup when extension is unloaded
+function deactivate() {
+  // Stop all polling timers to free resources
+  if (activationTimer) clearInterval(activationTimer);
+  if (copilotLogTimer) clearInterval(copilotLogTimer);
+  if (commitPollTimer) clearInterval(commitPollTimer);
+}
+
+// === Command Registration ===
+// Register VS Code commands accessible via command palette
+function registerCommands(context) {
+  // Show output channel command
+  context.subscriptions.push(vscode.commands.registerCommand("commitConfessional.showOutput", () => outputChannel.show(true)));
+  context.subscriptions.push(vscode.commands.registerCommand("lcn.showLog", () => outputChannel.show(true)));
+  context.subscriptions.push(vscode.commands.registerCommand("commitConfessional.inspectAiExtensions", () => {
+    const snapshot = getWatchedExtensions().map((id) => {
+      const ext = vscode.extensions.getExtension(id);
+      return `${id}: ${ext ? (ext.isActive ? "active" : "installed-inactive") : "not-installed"}`;
+    });
+    outputChannel.appendLine(snapshot.join("\n"));
+    outputChannel.show(true);
+  }));
+  context.subscriptions.push(vscode.commands.registerCommand("commitConfessional.listMatchingExtensions", () => {
+    const matches = vscode.extensions.all.map((ext) => ext.id).filter((id) => /(copilot|codex|openai|chatgpt)/i.test(id)).sort();
+    outputChannel.appendLine(matches.length ? matches.join("\n") : "No matching extensions found.");
+    outputChannel.show(true);
+  }));
+  context.subscriptions.push(vscode.commands.registerCommand("commitConfessional.debugStatus", async () => {
+    outputChannel.clear();
+    outputChannel.appendLine(`Detector log: ${LOG_PATH}`);
+    outputChannel.appendLine(`Commit backend: ${getCommitConfig("backendUrl") || "NOT SET"}`);
+    outputChannel.appendLine(`Narrator backend: ${getNarratorConfig().backendUrl}`);
+    outputChannel.appendLine(`Current tool: ${currentTool()}`);
+    outputChannel.appendLine(`Clipboard length: ${(await readClipboardSafe()).length}`);
+    outputChannel.show(true);
+  }));
+  context.subscriptions.push(vscode.commands.registerCommand("commitConfessional.connectGithub", async () => {
+    try {
+      await triggerGithubOAuth("vscode-extension");
+    } catch (error) {
+      log(`GitHub connect failed: ${error?.message || String(error)}`);
+      void vscode.window.showErrorMessage(`GitHub connect failed: ${error?.message || String(error)}`);
+    }
+  }));
+  context.subscriptions.push(vscode.commands.registerCommand("commitConfessional.showAddedLinesStats", async () => {
+    const stats = getAddedLinesStats();
+    const repoRoot = getPreferredRepoRoot();
+    const diffSummary = repoRoot ? await getWorkingTreeLineageSummary(repoRoot).catch(() => null) : null;
+    outputChannel.clear();
+    outputChannel.appendLine(`=== Session Added Lines Statistics ===`);
+    outputChannel.appendLine(`Total newly added lines: ${stats.totalSessionLines}`);
+    outputChannel.appendLine(`Files modified: ${stats.filesModified}`);
+    if (diffSummary) {
+      outputChannel.appendLine(``);
+      outputChannel.appendLine(`=== Working Tree Lineage ===`);
+      outputChannel.appendLine(`Git diff added lines: ${diffSummary.gitAddedLines}`);
+      outputChannel.appendLine(`AI lines: ${diffSummary.aiLines} (${diffSummary.aiPct}%)`);
+      outputChannel.appendLine(`User pasted lines: ${diffSummary.userPastedLines}`);
+      outputChannel.appendLine(`User typed/manual lines: ${diffSummary.userTypedLines}`);
+      outputChannel.appendLine(`Observed human lines: ${diffSummary.observedHumanLines} (${diffSummary.observedHumanPct}%)`);
+      outputChannel.appendLine(`Inferred human lines from git diff: ${diffSummary.inferredHumanLines} (${diffSummary.inferredHumanPct}%)`);
+      outputChannel.appendLine(`Unclassified added lines: ${diffSummary.unknownLines}`);
+    }
+    outputChannel.appendLine(`\nBreakdown by file:`);
+    for (const [file, count] of Object.entries(stats.breakdown)) {
+      outputChannel.appendLine(`  ${path.basename(file)}: +${count} lines`);
+    }
+    outputChannel.show(true);
+  }));
+  context.subscriptions.push(vscode.commands.registerCommand("commitConfessional.showCopilotLogStats", async () => {
+    const repoRoot = getPreferredRepoRoot();
+    const diffText = repoRoot ? await buildPreviewDiffText(repoRoot).catch(() => "") : "";
+    const summary = buildSessionLineMonitorSummary(countRawAddedDiffLines(diffText));
+    outputChannel.clear();
+    outputChannel.appendLine(`=== Copilot Log Detection ===`);
+    outputChannel.appendLine(`Detected completion events: ${summary.events}`);
+    outputChannel.appendLine(`Detected Copilot lines: ${summary.copilotLines}`);
+    outputChannel.appendLine(`Detected manual human lines: ${summary.humanLines}`);
+    outputChannel.appendLine(`Tracked lines (AI + human): ${summary.totalTrackedLines}`);
+    outputChannel.appendLine(`Current git diff added lines: ${summary.gitAddedLines}`);
+    outputChannel.appendLine(`AI / (AI + human) ratio: ${summary.ratioPct}%`);
+    outputChannel.show(true);
+  }));
+  context.subscriptions.push(vscode.commands.registerCommand("commitConfessional.testLatestReceipt", async () => {
+    const repoRoot = getPreferredRepoRoot();
+    if (!repoRoot) {
+      void vscode.window.showErrorMessage("No git repository was found in the current workspace.");
+      return;
+    }
+
+    try {
+      await publishReceiptForRepo(repoRoot, true);
+      outputChannel.show(true);
+      void vscode.window.showInformationMessage("Latest receipt posted. Check Commit Confessional output.");
+    } catch (error) {
+      log(`Manual receipt test failed: ${error?.message || String(error)}`);
+      outputChannel.show(true);
+      void vscode.window.showErrorMessage("Receipt test failed. Check Commit Confessional output.");
+    }
+  }));
+  context.subscriptions.push(vscode.commands.registerCommand("commitConfessional.previewAiPercentage", async () => {
+    const repoRoot = getPreferredRepoRoot();
+    if (!repoRoot) {
+      void vscode.window.showErrorMessage("No git repository was found in the current workspace.");
+      return;
+    }
+
+    try {
+      await previewReceiptForRepo(repoRoot);
+      outputChannel.show(true);
+      void vscode.window.showInformationMessage("Preview AI percentage generated. Check Commit Confessional output.");
+    } catch (error) {
+      log(`Preview AI percentage failed: ${error?.message || String(error)}`);
+      outputChannel.show(true);
+      void vscode.window.showErrorMessage("Preview AI percentage failed. Check Commit Confessional output.");
+    }
+  }));
+  context.subscriptions.push(vscode.commands.registerCommand("lcn.pingBackend", async () => {
+    const cfg = getNarratorConfig();
+    try {
+      const response = await fetch(`${trimSlash(cfg.backendUrl)}/health`);
+      log(`LCN /health ${response.status}`);
+      void vscode.window.showInformationMessage(`LCN backend ${response.status}`);
+    } catch (error) {
+      log(`LCN health failed: ${error?.message || String(error)}`);
+      void vscode.window.showErrorMessage(`LCN backend unavailable`);
+    }
+  }));
+}
+
+// === Event Listener Registration ===
+// Hook into VS Code events to track Copilot usage and file changes
+function registerListeners(context, sidebar) {
+  const onWillExecuteCommand = vscode.commands.onWillExecuteCommand;
+  // Track when Copilot commands are executed
+  if (typeof onWillExecuteCommand === "function") {
+    context.subscriptions.push(onWillExecuteCommand((event) => {
+      const toolName = COPILOT_COMMANDS[event?.command];
+      if (!toolName) return;
+      pendingTool = toolName; // Update current tool
+      pendingToolTime = Date.now();
+      appendJsonLine({ label: "copilot-command", provider: "copilot", command: event.command, tool: toolName });
+      log(`copilot-command: ${event.command} -> ${toolName}`);
+      outputChannel.show(true);
+    }));
+  }
+  // Track text changes (detect suggestions/completions)
+  context.subscriptions.push(vscode.workspace.onDidChangeTextDocument((event) => void handleDocumentChange(event)));
+  // Track saved documents (detect significant code changes)
+  context.subscriptions.push(vscode.workspace.onDidSaveTextDocument((doc) => void handleNarratorSave(doc, sidebar)));
+}
+
+// === Helper Function ===
+// Check if document should be ignored (virtual files, debug output, logs)
+function shouldIgnoreDocument(document) {
+  const scheme = String(document?.uri?.scheme || ""); // Check URI scheme
+  const fileName = String(document?.fileName || "");  // Check file name
+  // Ignore VS Code virtual documents and log files
+  return scheme === "output" || scheme === "extension-output" || fileName.endsWith(".log");
+}
+
+// === Document Change Handler ===
+// Monitor text insertion to detect Copilot suggestions and user pastes
+async function handleDocumentChange(event) {
+  if (!event?.contentChanges?.length || shouldIgnoreDocument(event.document)) return;
+  const change = event.contentChanges[0];
+  const insertedText = String(change.text || "");
+  if (!insertedText.trim()) return; // Skip whitespace-only changes
+
+  const now = Date.now();
+  const documentPath = event.document?.uri?.fsPath || event.document?.uri?.toString() || "unknown";
+  const looksTyped = insertedText.length === 1 && !insertedText.includes("\n");
+  if (looksTyped) return; // Skip individual character typing
+
+  const clipboardText = await readClipboardSafe();
+  const isPaste = detectPaste(insertedText, clipboardText);
+  const source = classifyInsertionSource(now, isPaste, insertedText);
+  const isSensitiveDocument = isSensitiveDocumentPath(documentPath);
+  const contentText = isPaste ? clipboardText : insertedText;
+  const loggableContentText = isSensitiveDocument ? "" : contentText;
+  const clipboardPreview = isSensitiveDocument ? "[redacted-sensitive-file]" : buildPreview(clipboardText);
+  const promptPreview = isSensitiveDocument ? "[redacted-sensitive-file]" : buildPreview(contentText);
+  const provider = inferInsertionProvider(source, { isSensitiveDocument });
+  const lineCount = insertedText.split(/\r?\n/).length;
+
+  if (source === "typed") {
+    recordPendingHumanInsertion(documentPath, insertedText, {
+      source: "human-typed",
+      createdAt: now,
+    });
+    return;
+  }
+
+  lastPromptContext = {
+    source,
+    createdAt: now,
+    preview: promptPreview,
+    documentPath,
+  };
+
+  if (provider && !isSensitiveDocument) {
+    recordPendingAiInsertion(documentPath, loggableContentText, {
+      provider,
+      model: lastDetectedModel,
+      tool: currentTool(),
+      source,
+      createdAt: now,
+    });
+  } else if (!isSensitiveDocument) {
+    recordPendingHumanInsertion(documentPath, loggableContentText, {
+      source: source === "paste-event" ? "paste-event" : "human-typed",
+      createdAt: now,
+    });
+  }
+
+  await emitCommitEvent(source === "paste-event" ? "paste-detected" : "inline-suggestion", {
+    appName: "vscode",
+    provider: source === "inline-suggestion" ? provider || "copilot" : provider || "editor",
+    extensionId: "vscode.editor",
+    documentPath,
+    method: source === "inline-suggestion" ? "SUGGESTION" : "PASTE",
+    eventType: source,
+    clipboardPreview,
+    promptPreview,
+    contentHash: hashContent(loggableContentText),
+    lineCount,
+    contentText: loggableContentText,
+    tool: currentTool(),
+    model: lastDetectedModel,
+  });
+  log(
+    `${source}: ${path.basename(documentPath)} lines=${lineCount} tool=${currentTool()} preview=${buildPreview(
+      isSensitiveDocument ? "[redacted-sensitive-file]" : loggableContentText
+    )}`
+  );
+}
+
+// === Narrator Save Handler ===
+// Generate code diffs and send to narrator backend for documentation generation
+async function handleNarratorSave(doc, sidebar) {
+  if (doc.isUntitled || doc.uri.scheme !== "file") return; // Only track real files
+  const cfg = getNarratorConfig();
+  const fsPath = doc.uri.fsPath;
+  if (isIgnoredByNarrator(fsPath, cfg.ignoreGlobs)) return; // Skip ignored paths
+
+  // Compare current state with last snapshot
+  const previous = narratorSnapshots.get(fsPath)?.text ?? "";
+  const next = doc.getText();
+  narratorSnapshots.set(fsPath, { text: next, version: doc.version }); // Update snapshot
+
+  // Generate unified diff and count changes
+  const diff = createUnifiedDiff(fsPath, previous, next);
+  const changedLines = countChangedLines(diff);
+
+  try {
+    const tagSummary = updateAiDetectorStateForDocument(doc, previous, next);
+    if (tagSummary?.touchedByAi) {
+      log(`AI tags updated: ${tagSummary.filePath} ai=${tagSummary.aiTaggedLines}/${tagSummary.totalMeaningfulLines}`);
+    }
+    
+    // Track newly added lines in this session
+    trackAddedLines(fsPath, previous, next);
+  } catch (error) {
+    log(`AI detector update failed: ${error?.message || String(error)}`);
+  }
+
+  if (changedLines < cfg.minChangedLines) return; // Skip minimal changes
+
+  // Debounce if previous delta still pending (user still editing)
+  const existing = narratorPending.get(fsPath);
+  if (existing) clearTimeout(existing.timer);
+
+  // Delay sending delta to batch rapid edits (debouncing)
+  const timer = setTimeout(async () => {
+    narratorPending.delete(fsPath);
+    const payload = {
+      sessionId: DEFAULT_SESSION_ID,
+      author: vscode.env.machineId ? `dev-${vscode.env.machineId.slice(0, 6)}` : "dev",
+      filePath: fsPath,
+      language: doc.languageId,
+      diff,
+      context: next.slice(0, 8000),
+      changedLines,
+      source: "vscode",
+    };
+    try {
+      const response = await fetchJson(`${trimSlash(cfg.backendUrl)}/deltas`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      if (response?.doc) sidebar.notifyDocs([response.doc]);
+      log(`LCN delta sent: ${fsPath}`);
+    } catch (error) {
+      log(`LCN delta failed: ${error?.message || String(error)}`);
+    }
+  }, cfg.debounceMs);
+
+  narratorPending.set(fsPath, { timer });
+}
+
+// === AI Extension Polling ===
+// Monitor configured AI extensions for activation/deactivation events
+async function pollAiExtensionActivation(initial = false) {
+  const now = Date.now();
+  for (const extensionId of getWatchedExtensions()) {
+    const extension = vscode.extensions.getExtension(extensionId);
+    const isActive = Boolean(extension?.isActive);
+    const previous = extensionStates.get(extensionId);
+    extensionStates.set(extensionId, isActive); // Track state change
+    if (initial || !extension || !isActive || previous === isActive) continue; // Only on state change
+    const recentPrompt = getRecentPromptContext(now);
+    await emitCommitEvent("ai-activated", {
+      appName: "vscode",
+      provider: detectProviderFromExtensionId(extensionId),
+      extensionId,
+      eventType: "ai-activated",
+      method: "ACTIVATE",
+      documentPath: recentPrompt?.documentPath || getActiveDocumentPath(),
+      promptPreview: recentPrompt?.preview || "none",
+      clipboardPreview: recentPrompt?.source === "paste-event" ? recentPrompt.preview : "none",
+      endpoint: `vscode-extension://${extensionId}`,
+      tabTitle: vscode.window.activeTextEditor?.document?.fileName || "",
+    });
+  }
+}
+
+// === Repository Commit Polling ===
+// Monitor git repositories for new commits and analyze their AI contribution
+async function pollWorkspaceCommits(initial = false) {
+  for (const repoRoot of getWorkspaceRepoRoots()) {
+    let headSha = "";
+    try {
+      headSha = (await runGit(["rev-parse", "HEAD"], repoRoot)).trim(); // Get current HEAD commit
+    } catch {
+      continue; // Invalid git repo, skip
+    }
+
+    const previousHead = repoHeads.get(repoRoot);
+    repoHeads.set(repoRoot, headSha);
+    if (initial || !previousHead) {
+      if (!commitReceiptBootstrap.has(`${repoRoot}:${headSha}`)) {
+        commitReceiptBootstrap.add(`${repoRoot}:${headSha}`);
+        try {
+          await publishReceiptForRepo(repoRoot, true);
+        } catch (error) {
+          log(`Startup receipt publish failed: ${error?.message || String(error)}`);
+        }
+      }
+      continue;
+    }
+
+    if (previousHead === headSha) {
+      continue; // No new commits
+    }
+
+    // New commit detected, generate receipt
+    try {
+      await publishReceiptForRepo(repoRoot);
+    } catch (error) {
+      log(`Commit receipt publish failed: ${error?.message || String(error)}`);
+    }
+  }
+}
+
+// === Receipt Generation ===
+// Generate AI contribution analysis receipt for a commit
+async function publishReceiptForRepo(repoRoot, forceCurrentHead = false) {
+  const commitHash = (await runGit(["rev-parse", "HEAD"], repoRoot)).trim();
+  if (!commitHash) {
+    throw new Error("Unable to resolve HEAD.");
+  }
+
+  const diffText = await runGit(["show", "--format=", "--unified=0", commitHash], repoRoot);
+  const filePaths = extractChangedFilePathsFromDiff(diffText);
+  const latestCommit = await runGit(["show", "-s", "--format=%s", commitHash], repoRoot);
+  const addedLineSamples = extractAddedLineSamples(diffText, 2);
+  const gitAddedLines = countRawAddedDiffLines(diffText);
+  const localAiShare = computeAiShareForDiff(diffText, repoRoot);
+  const copilotAccumulator = buildSessionLineMonitorSummary(gitAddedLines);
+  const receiptBaseUrl = trimSlash(getCommitConfig("backendUrl") || "http://127.0.0.1:4000/api/extension/events").replace(/\/api\/extension\/events$/, "");
+  const response = await fetch(`${receiptBaseUrl}/api/receipt`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      commitHash,
+      diffText,
+      receiptUrl: `commit://${commitHash}`,
+      commitMessage: latestCommit.trim(),
+      filePaths,
+      newlyAddedLines: gitAddedLines,
+      localAiShare,
+      copilotAccumulator,
+    }),
+  });
+
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(body?.message || `Receipt request failed with ${response.status}`);
+  }
+
+  const evidence = body.modelEvidence || {};
+  const contribution = evidence.contribution || {};
+  const copilotContribution = body.copilotContribution || evidence.copilotContribution || {};
+  log(`${forceCurrentHead ? "Manual" : "Auto"} receipt for ${commitHash.slice(0, 8)} ${latestCommit.trim()}`);
+  log(
+    `AI contribution: matched=${contribution.aiMatchedLines || 0}/${contribution.totalChangedLines || 0} percentage=${contribution.estimatedAiPercentage || 0}% confidence=${contribution.confidenceLevel || "LOW"}`
+  );
+  log(
+    `Copilot contribution: matched=${copilotContribution.aiMatchedLines || 0}/${copilotContribution.totalChangedLines || 0} percentage=${copilotContribution.estimatedAiPercentage || 0}% confidence=${copilotContribution.confidenceLevel || "LOW"} events=${copilotContribution.eventCount || 0}`
+  );
+  log(
+    `Local AI share (meaningful added lines): total=${localAiShare.totalMeaningfulAdded} ai=${localAiShare.aiTagged} human=${localAiShare.humanTagged} unknown=${localAiShare.unknownTagged} aiPct=${localAiShare.aiPct}% humanPct=${localAiShare.humanPct}%`
+  );
+  log(
+    `Commit session monitor: copilotLines=${totalCopilotLogDetectedLines} manualHumanLines=${totalHumanManualDetectedLines} trackedLines=${totalCopilotLogDetectedLines + totalHumanManualDetectedLines} ratio=${copilotAccumulator.ratioPct}% gitAddedLines=${gitAddedLines}`
+  );
+  logCopilotAccumulatorSummary("Commit Copilot monitor", gitAddedLines, totalHumanManualDetectedLines);
+  if (addedLineSamples.length > 0) {
+    log("Added line samples:");
+    for (const line of addedLineSamples) {
+      log(`  + ${line}`);
+    }
+  } else {
+    log("Added line samples: none");
+  }
+  if (Array.isArray(contribution.matchedLineSamples) && contribution.matchedLineSamples.length) {
+    log("AI matched line samples:");
+    for (const line of contribution.matchedLineSamples.slice(0, 2)) {
+      log(`  = ${line}`);
+    }
+  }
+  if (Array.isArray(evidence.evidence) && evidence.evidence.length) {
+    for (const line of evidence.evidence) {
+      log(`evidence: ${line}`);
+    }
+  }
+  if (!forceCurrentHead) {
+    resetCommitSessionMonitors("commit published");
+  }
+  return body;
+}
+
+// === Receipt Preview ===
+// Generate preview of AI contribution for staged/working changes
+async function previewReceiptForRepo(repoRoot) {
+  const diffText = await buildPreviewDiffText(repoRoot);
+
+  if (!diffText.trim()) {
+    throw new Error("No staged or working-tree diff found.");
+  }
+
+  const filePaths = extractChangedFilePathsFromDiff(diffText);
+  const addedLineSamples = extractAddedLineSamples(diffText, 2);
+  const gitAddedLines = countRawAddedDiffLines(diffText);
+  const localAiShare = computeAiShareForDiff(diffText, repoRoot);
+  const copilotAccumulator = buildSessionLineMonitorSummary(gitAddedLines);
+  const receiptBaseUrl = trimSlash(getCommitConfig("backendUrl") || "http://127.0.0.1:4000/api/extension/events").replace(/\/api\/extension\/events$/, "");
+  const response = await fetch(`${receiptBaseUrl}/api/receipt`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      diffText,
+      receiptUrl: "preview://working-tree",
+      filePaths,
+      newlyAddedLines: gitAddedLines,
+      copilotAccumulator,
+    }),
+  });
+
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(body?.message || `Preview receipt request failed with ${response.status}`);
+  }
+
+  const evidence = body.modelEvidence || {};
+  const contribution = evidence.contribution || {};
+  const copilotContribution = body.copilotContribution || evidence.copilotContribution || {};
+  const lineageSummary = getWorkingTreeLineageSummary(repoRoot).catch(() => null);
+  log("Preview AI percentage");
+  log(
+    `AI contribution: matched=${contribution.aiMatchedLines || 0}/${contribution.totalChangedLines || 0} percentage=${contribution.estimatedAiPercentage || 0}% confidence=${contribution.confidenceLevel || "LOW"}`
+  );
+  log(
+    `Copilot contribution: matched=${copilotContribution.aiMatchedLines || 0}/${copilotContribution.totalChangedLines || 0} percentage=${copilotContribution.estimatedAiPercentage || 0}% confidence=${copilotContribution.confidenceLevel || "LOW"} events=${copilotContribution.eventCount || 0}`
+  );
+  logCopilotAccumulatorSummary("Preview Copilot monitor", gitAddedLines, totalHumanManualDetectedLines);
+  if (contribution.sampleTooSmall) {
+    log("AI contribution sample is too small for a stable percentage.");
+  }
+  if (copilotContribution.sampleTooSmall) {
+    log("Copilot contribution sample is too small for a stable percentage.");
+  }
+  if (addedLineSamples.length > 0) {
+    log("Added line samples:");
+    for (const line of addedLineSamples) {
+      log(`  + ${line}`);
+    }
+  } else {
+    log("Added line samples: none");
+  }
+  if (Array.isArray(contribution.matchedLineSamples) && contribution.matchedLineSamples.length) {
+    log("AI matched line samples:");
+    for (const line of contribution.matchedLineSamples.slice(0, 2)) {
+      log(`  = ${line}`);
+    }
+  }
+  if (Array.isArray(evidence.evidence) && evidence.evidence.length) {
+    for (const line of evidence.evidence) {
+      log(`evidence: ${line}`);
+    }
+  }
+  const workingTreeLineage = await lineageSummary;
+  if (workingTreeLineage) {
+    log(
+      `Working tree lineage: git=${workingTreeLineage.gitAddedLines} ai=${workingTreeLineage.aiLines} pasted=${workingTreeLineage.userPastedLines} typed=${workingTreeLineage.userTypedLines} aiPct=${workingTreeLineage.aiPct}% observedHumanPct=${workingTreeLineage.observedHumanPct}% inferredHumanPct=${workingTreeLineage.inferredHumanPct}% unknown=${workingTreeLineage.unknownLines}`
+    );
+  }
+  return body;
+}
+
+// === Event Emission ===
+// Log events locally and send to remote backend for tracking
+async function emitCommitEvent(label, payload) {
+  appendJsonLine({ label, source: payload.eventType || label, ...payload }); // Log to local file
+  const backendUrl = getCommitConfig("backendUrl");
+  if (!backendUrl) return; // Skip remote if not configured
+  try {
+    await fetch(backendUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ...payload, userAgent: "vscode-extension" }),
+    });
+  } catch (error) {
+    log(`commit backend failed: ${error?.message || String(error)}`);
+  }
+}
+
+// === Copilot Log Polling ===
+// Monitor VS Code's Copilot log file for model queries and tool hints
+async function pollCopilotLogs(initial = false) {
+  const latestLog = findLatestCopilotLog();
+  if (!latestLog) {
+    if (initial) log("No Copilot log file found.");
+    return; // No log file available
+  }
+  // Detect when log file is rotated, reset tracking
+  if (watchedCopilotLogPath !== latestLog.fullPath) {
+    watchedCopilotLogPath = latestLog.fullPath; // Switch to new log file
+    watchedCopilotLogSize = latestLog.size; // Tail only new entries to avoid replaying stale completions
+    seenCopilotLogLines.clear(); // Clear dedup cache
+  }
+  // Read only new lines appended since last read
+  const chunk = readNewLogChunk(watchedCopilotLogPath, watchedCopilotLogSize);
+  if (!chunk) return; // No new data
+  watchedCopilotLogSize = chunk.nextOffset; // Update read position
+  for (const line of chunk.lines) {
+    const normalizedLine = String(line || "").trim();
+    const model = extractModelHint(normalizedLine);
+    const tool = inferToolFromCopilotLogLine(normalizedLine);
+    const codeContent = extractCodeFromCopilotLogLine(normalizedLine);
+    const hasRelevantSignal = Boolean(model || tool || codeContent);
+    const dedupeKey = `${watchedCopilotLogPath}|${normalizedLine}`;
+    if (!hasRelevantSignal || seenCopilotLogLines.has(dedupeKey)) continue;
+    seenCopilotLogLines.add(dedupeKey);
+    lastCopilotLogActivityAt = Date.now();
+    if (model) {
+      lastDetectedModel = model;
+    }
+    if (tool) {
+      pendingTool = tool;
+      pendingToolTime = Date.now();
+    }
+    if (codeContent) {
+      const completionLineCount = codeContent.split(/\r?\n/).length;
+      const activeDocPath = getActiveDocumentPath();
+      recordPendingAiInsertion(activeDocPath, codeContent, {
+        provider: "copilot",
+        model: model || lastDetectedModel,
+        tool: tool || currentTool(),
+        source: "copilot-log-completion",
+        createdAt: Date.now(),
+      });
+      appendJsonLine({
+        label: "copilot-log-completion",
+        source: "copilot-log-completion",
+        provider: "copilot",
+        model: model || lastDetectedModel || null,
+        tool: tool || currentTool(),
+        documentPath: activeDocPath,
+        contentHash: hashContent(codeContent),
+        lineCount: completionLineCount,
+        contentText: codeContent,
+      });
+      totalCopilotLogEvents += 1;
+      totalCopilotLogDetectedLines += completionLineCount;
+      log(
+        `copilot-log completion: lines=${completionLineCount} sessionLines=${totalCopilotLogDetectedLines} events=${totalCopilotLogEvents} model=${model || lastDetectedModel || "unknown"} tool=${tool || currentTool()} file=${path.basename(activeDocPath || "unknown")}`
+      );
+      outputChannel?.show(true);
+    }
+    appendJsonLine({
+      label: model ? "model-query" : "copilot-log-signal",
+      source: "copilot-log",
+      provider: "copilot",
+      model: model || lastDetectedModel || null,
+      tool: tool || currentTool(),
+      rawLine: normalizedLine,
+    });
+    log(`copilot-log: model=${model || lastDetectedModel || "unknown"} tool=${tool || currentTool()} line=${buildPreview(normalizedLine)}`);
+  }
+}
+
+// === Utility Functions ===
+
+// Get list of AI extensions to monitor from configuration
+function getWatchedExtensions() {
+  const configured = getCommitConfig("aiExtensions");
+  return Array.isArray(configured) ? configured : []; // Default to empty if not configured
+}
+
+// Check if user input is recent enough to be in prompt context window
+function getRecentPromptContext(now) {
+  if (!lastPromptContext) return null;
+  return now - lastPromptContext.createdAt <= Number(getCommitConfig("promptWindowMs") || 60000)
+    ? lastPromptContext
+    : null; // Beyond window, discard
+}
+
+// Get file path of currently active editor
+function getActiveDocumentPath() {
+  return vscode.window.activeTextEditor?.document?.uri?.fsPath || "unknown";
+}
+
+// === Tool Detection ===
+// Determine which AI tool or human interaction is currently active
+function currentTool() {
+  if (pendingTool && Date.now() - pendingToolTime < TOOL_WINDOW_MS) return pendingTool; // Recent command
+  if (Date.now() - lastCopilotLogActivityAt < COPILOT_LOG_WINDOW_MS) return "Copilot (log activity)"; // Recent log
+  return "Human / Unknown"; // Fallback
+}
+
+// Classify how text was inserted: typed manually, pasted, or AI suggestion
+function classifyInsertionSource(now, isPaste, insertedText) {
+  if (isPaste) return "paste-event"; // Explicit paste from clipboard
+  // Multi-line or long text during AI activity suggests suggestion
+  const hasActiveTool = currentTool() !== "Human / Unknown";
+  const hasRecentCopilotActivity = now - lastCopilotLogActivityAt < COPILOT_RECENT_ACTIVITY_WINDOW_MS;
+  const isMultiLine = insertedText.includes("\n");
+  if ((hasActiveTool || hasRecentCopilotActivity) && insertedText.length > 10) {
+    return "inline-suggestion";
+  }
+  if (hasRecentCopilotActivity && isMultiLine) {
+    return "inline-suggestion";
+  }
+  return "typed"; // Single character typing
+}
+
+// Detect if inserted text exactly matches clipboard content (paste detection)
+function detectPaste(insertedText, clipboardText) {
+  const minLength = Number(getCommitConfig("pasteMinLength") || 12);
+  // Normalize whitespace and compare
+  return normalizeWhitespace(insertedText).length >= minLength && normalizeWhitespace(insertedText) === normalizeWhitespace(clipboardText);
+}
+
+// Map extension ID to AI provider name
+function detectProviderFromExtensionId(extensionId) {
+  const value = String(extensionId || "").toLowerCase();
+  if (value.includes("copilot")) return "copilot";
+  if (value.includes("codex")) return "codex";
+  if (value.includes("openai") || value.includes("chatgpt")) return "openai";
+  return "unknown"; // Unrecognized provider
+}
+
+// === Configuration ===
+
+// Fetch configuration value from commitConfessional extension settings
+function getCommitConfig(key) {
+  return vscode.workspace.getConfiguration("commitConfessional").get(key);
+}
+
+function getCommitBackendBaseUrl() {
+  return trimSlash(getCommitConfig("backendUrl") || "http://127.0.0.1:4000/api/extension/events").replace(/\/api\/extension\/events$/, "");
+}
+
+async function promptGithubAuthIfNeeded() {
+  if (githubAuthPrompted) {
+    return;
+  }
+  githubAuthPrompted = true;
+
+  try {
+    const status = await fetchGithubStatus();
+    if (status?.connected) {
+      return;
+    }
+    if (!status?.configured) {
+      log("GitHub OAuth is not configured on the backend.");
+      void vscode.window.showWarningMessage("GitHub OAuth is not configured on the backend.");
+      return;
+    }
+
+    const action = await vscode.window.showInformationMessage(
+      "Connect GitHub to sync commit receipts with the dashboard.",
+      "Connect GitHub",
+      "Later"
+    );
+    if (action === "Connect GitHub") {
+      await triggerGithubOAuth("vscode-extension");
+    }
+  } catch (error) {
+    log(`GitHub status check failed: ${error?.message || String(error)}`);
+  }
+}
+
+async function fetchGithubStatus() {
+  const response = await fetch(`${getCommitBackendBaseUrl()}/api/github/status`);
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(body?.message || `GitHub status failed with ${response.status}`);
+  }
+  return body?.github || null;
+}
+
+async function triggerGithubOAuth(returnPath = "/") {
+  const loginUrl = buildFrontendGithubLoginUrl("vscode-extension", returnPath);
+  await vscode.env.openExternal(vscode.Uri.parse(loginUrl));
+  void vscode.window.showInformationMessage("Opened GitHub login page in your browser.");
+}
+
+function buildFrontendGithubLoginUrl(source, returnPath = "/") {
+  const frontendBaseUrl = String(process.env.FRONTEND_URL || DEFAULT_FRONTEND_URL).trim() || DEFAULT_FRONTEND_URL;
+  const url = new URL(frontendBaseUrl);
+  url.pathname = "/github-login";
+  url.searchParams.set("autoconnect", "1");
+  url.searchParams.set("source", source);
+  url.searchParams.set("returnPath", returnPath || "/");
+  return url.toString();
+}
+
+// Fetch narrator (LCN) configuration with defaults
+function getNarratorConfig() {
+  const cfg = vscode.workspace.getConfiguration("lcn");
+  return {
+    backendUrl: cfg.get("backendUrl", "http://localhost:8787"), // LCN backend endpoint
+    debounceMs: cfg.get("debounceMs", 5000), // Debounce time for code changes
+    minChangedLines: cfg.get("minChangedLines", 1), // Minimum changed lines to trigger narrator
+    ignoreGlobs: cfg.get("ignoreGlobs", ["**/node_modules/**", "**/dist/**", "**/build/**", "**/.git/**", "**/*.map", "**/*lock*.json"]), // Patterns to ignore
+  };
+}
+
+// Check if file path should be ignored by narrator
+function isIgnoredByNarrator(filePath, globs) {
+  const normalized = String(filePath || "").replace(/\\/g, "/");
+  return globs.some((glob) => globToRegExp(glob).test(normalized)); // Test against all ignore patterns
+}
+
+// Convert glob pattern to RegExp for matching
+function globToRegExp(glob) {
+  let pattern = String(glob || "").replace(/\\/g, "/").replace(/[|{}()[\]^$+?.]/g, "\\$&"); // Escape regex chars
+  pattern = pattern.replace(/\*\*/g, ".*").replace(/\*/g, "[^/]*"); // Convert glob wildcards
+  return new RegExp(`^${pattern}$`, "i");
+}
+
+// === Diff Generation ===
+// Create unified diff format from before/after file contents
+function createUnifiedDiff(filePath, beforeText, afterText) {
+  const before = splitLines(beforeText);
+  const after = splitLines(afterText);
+  const max = Math.max(before.length, after.length);
+  // Build unified diff with headers
+  const lines = [`--- ${filePath}`, `+++ ${filePath}`, `@@ -1,${before.length} +1,${after.length} @@`];
+  // Compare line by line
+  for (let i = 0; i < max; i += 1) {
+    if (before[i] === after[i]) {
+      if (before[i] !== undefined) lines.push(` ${before[i]}`); // Context line
+      continue;
+    }
+    if (before[i] !== undefined) lines.push(`-${before[i]}`); // Removed line
+    if (after[i] !== undefined) lines.push(`+${after[i]}`); // Added line
+  }
+  return lines.join("\n");
+}
+
+// Count changed (added + removed) lines in a diff
+function countChangedLines(diff) {
+  return (diff.match(/^\+[^+]/gm) || []).length + (diff.match(/^-[^-]/gm) || []).length; // Lines starting with +/- (not +++/---)
+}
+
+// Split text into lines, handling different line ending formats
+function splitLines(value) {
+  return value ? String(value).replace(/\r/g, "").split("\n") : [];
+}
+
+// === Log File Discovery ===
+// Find the most recent VS Code Copilot log file
+function findLatestCopilotLog() {
+  const appData = process.env.APPDATA; // Windows APPDATA folder
+  if (!appData) return null; // No APPDATA on non-Windows or missing
+  const logsRoot = path.join(appData, "Code", "logs"); // VS Code logs directory
+  if (!fs.existsSync(logsRoot)) return null; // Log directory doesn't exist
+  // Find Copilot logs, sort by modification time (newest first)
+  return walkLogFiles(logsRoot).filter((file) => /copilot/i.test(file.fullPath)).sort((a, b) => b.mtimeMs - a.mtimeMs)[0] || null;
+}
+
+// Recursively walk directory tree to find all .log files
+function walkLogFiles(root) {
+  const results = []; // Accumulate results
+  const stack = [root]; // DFS stack for directory traversal
+  while (stack.length) {
+    const current = stack.pop();
+    let entries = [];
+    try { entries = fs.readdirSync(current, { withFileTypes: true }); } catch { continue; } // Skip unreadable dirs
+    for (const entry of entries) {
+      const fullPath = path.join(current, entry.name);
+      if (entry.isDirectory()) stack.push(fullPath); // Recurse into subdirectories
+      if (entry.isFile() && entry.name.toLowerCase().endsWith(".log")) {
+        try {
+          const stats = fs.statSync(fullPath);
+          results.push({ fullPath, mtimeMs: stats.mtimeMs, size: stats.size });
+        } catch {}
+      }
+    }
+  }
+  return results;
+}
+
+// Read new lines appended to a log file since last read (at offset)
+function readNewLogChunk(filePath, offset) {
+  let stats;
+  try { stats = fs.statSync(filePath); } catch { return null; } // File may have been deleted
+  const start = stats.size < offset ? 0 : offset; // Handle log rotation (file shrinking)
+  if (stats.size === start) return null; // No new data
+  // Read from last offset to end of file
+  const buffer = Buffer.alloc(stats.size - start);
+  const fd = fs.openSync(filePath, "r");
+  try { fs.readSync(fd, buffer, 0, buffer.length, start); } finally { fs.closeSync(fd); }
+  return { nextOffset: stats.size, lines: buffer.toString("utf8").split(/\r?\n/) }; // Split into lines
+}
+
+// === Log Analysis ===
+// Extract AI model names from Copilot log entries
+function extractModelHint(line) {
+  // Match common AI model names: Claude, GPT, Gemini, O1/O3, etc.
+  for (const pattern of [/claude[- ]?[a-z0-9.]*/i, /gpt[- ]?[0-9a-z.]*/i, /gemini[- ]?[0-9a-z.]*/i, /o[0-9][ -]?[a-z0-9]*/i]) {
+    const match = String(line || "").match(pattern);
+    if (match) return match[0];
+  }
+  return null; // No model found in line
+}
+
+// Infer which Copilot feature is being used from log patterns
+function inferToolFromCopilotLogLine(line) {
+  const value = String(line || "").toLowerCase();
+  // Match log patterns to specific Copilot features
+  if (value.includes("[panel/editagent]")) return "Copilot Chat Edit";
+  if (value.includes("[copilotlanguagemodelwrapper]")) return "Copilot Inline Suggestion";
+  if (value.includes("[title]") || value.includes("[progressmessages]")) return "Copilot Chat";
+  return null; // Unrecognized pattern
+}
+
+// Append timestamped JSON line to local event log file
+function appendJsonLine(payload) {
+  try { fs.appendFileSync(LOG_PATH, `${JSON.stringify({ ts: new Date().toISOString(), ...payload })}\n`, "utf8"); } catch {}
+}
+
+// Track newly added lines in a file during this session
+function trackAddedLines(filePath, previousText, nextText) {
+  const diff = createUnifiedDiff(filePath, previousText, nextText);
+  const addedLines = extractAddedLinesByFile(diff).filter((entry) => String(entry.line || "").trim().length > 0).length;
+  
+  if (addedLines > 0) {
+    const currentCount = addedLinesPerSession.get(filePath) || 0;
+    addedLinesPerSession.set(filePath, currentCount + addedLines);
+    totalNewlyAddedLines += addedLines;
+    
+    log(`Lines added in ${path.basename(filePath)}: +${addedLines} (session total: ${totalNewlyAddedLines})`);
+    appendJsonLine({ 
+      label: "lines-added", 
+      filePath, 
+      addedLinesCount: addedLines, 
+      sessionTotal: totalNewlyAddedLines 
+    });
+  }
+  
+  return addedLines;
+}
+
+// Get current session stats for newly added lines
+function getAddedLinesStats() {
+  return {
+    totalSessionLines: totalNewlyAddedLines,
+    filesModified: addedLinesPerSession.size,
+    breakdown: Object.fromEntries(addedLinesPerSession),
+  };
+}
+
+function updateAiDetectorStateForDocument(doc, previousText, nextText) {
+  const repoRoot = getWorkspaceRootForUri(doc.uri);
+  if (!repoRoot) {
+    return null;
+  }
+
+  const detectorPath = path.join(repoRoot, AI_DETECTOR_FILE);
+  const detector = loadAiDetectorState(detectorPath);
+  const filePath = normalizeTrackedPath(path.relative(repoRoot, doc.uri.fsPath));
+  const fileState = detector.files[filePath] || createEmptyFileState(doc.languageId);
+  const recentInsertions = getRecentAiInsertions(doc.uri.fsPath);
+  const recentHumanInsertions = getRecentHumanInsertions(doc.uri.fsPath);
+  const nextLineTags = buildNextLineTags({
+    previousLineTags: fileState.lineTags,
+    nextText,
+    recentInsertions,
+    recentHumanInsertions,
+  });
+  const aiTaggedLines = nextLineTags.filter((entry) => entry.ai).length;
+  const totalMeaningfulLines = nextLineTags.length;
+  const aiShare = totalMeaningfulLines > 0 ? Math.round((aiTaggedLines / totalMeaningfulLines) * 100) : 0;
+  const touchedByAi = aiTaggedLines > 0 || recentInsertions.length > 0;
+
+  detector.files[filePath] = {
+    languageId: doc.languageId,
+    updatedAt: new Date().toISOString(),
+    totalMeaningfulLines,
+    aiTaggedLines,
+    aiShare,
+    dominantOrigin: aiShare >= 60 ? "ai-majority" : aiTaggedLines > 0 ? "mixed" : "human",
+    lineTags: nextLineTags.slice(0, 4000),
+  };
+  detector.updatedAt = new Date().toISOString();
+  fs.writeFileSync(detectorPath, `${JSON.stringify(detector, null, 2)}\n`, "utf8");
+
+  return {
+    filePath,
+    aiTaggedLines,
+    totalMeaningfulLines,
+    touchedByAi,
+  };
+}
+
+function buildNextLineTags({ previousLineTags, nextText, recentInsertions, recentHumanInsertions }) {
+  const now = new Date().toISOString();
+  const previousQueue = buildTagQueue(Array.isArray(previousLineTags) ? previousLineTags : []);
+  const previousSignatureQueue = buildMetadataQueue(previousLineTags, "signature", { aiOnly: true });
+  const previousSimilarityCandidates = buildSimilarityCandidates(previousLineTags, { aiOnly: true });
+  const insertionQueue = buildInsertionQueue(recentInsertions);
+  const humanInsertionQueue = buildInsertionQueue(recentHumanInsertions);
+  const insertionLineRecords = (Array.isArray(recentInsertions) ? recentInsertions : []).flatMap((entry) =>
+    entry.lineRecords || (entry.lines || []).map((line) => buildLineRecord(line))
+  );
+  const insertionSignatureQueue = buildMetadataQueue(
+    insertionLineRecords,
+    "signature"
+  );
+  const insertionSimilarityCandidates = buildSimilarityCandidates(insertionLineRecords);
+  const nextLines = extractMeaningfulLineRecords(nextText);
+
+  return nextLines.map((lineRecord) => {
+    const insertionTag = shiftQueuedEntry(insertionQueue, lineRecord.hash);
+    if (insertionTag) {
+      return buildStoredLineTag(lineRecord, {
+        ai: true,
+        provider: insertionTag.provider || null,
+        model: insertionTag.model || null,
+        tool: insertionTag.tool || null,
+        source: insertionTag.source || "inline-suggestion",
+        firstSeenAt: insertionTag.createdAt || now,
+        lastSeenAt: now,
+        matchType: "recent-ai-exact",
+      });
+    }
+
+    const humanInsertionTag = shiftQueuedEntry(humanInsertionQueue, lineRecord.hash);
+    if (humanInsertionTag) {
+      return buildStoredLineTag(lineRecord, {
+        ai: false,
+        provider: null,
+        model: null,
+        tool: null,
+        source: humanInsertionTag.source || "human-typed",
+        firstSeenAt: humanInsertionTag.createdAt || now,
+        lastSeenAt: now,
+        matchType: "recent-human-exact",
+      });
+    }
+
+    const carriedTag = shiftQueuedEntry(previousQueue, lineRecord.hash);
+    if (carriedTag) {
+      return buildStoredLineTag(lineRecord, {
+        ...carriedTag,
+        lastSeenAt: now,
+        matchType: "exact",
+      });
+    }
+
+    const structuralInsertionTag = consumeBestQueuedMatch(
+      insertionSignatureQueue,
+      lineRecord.signature,
+      lineRecord,
+      AI_FUZZY_MATCH_THRESHOLD
+    );
+    if (structuralInsertionTag) {
+      return buildStoredLineTag(lineRecord, {
+        ai: true,
+        provider: structuralInsertionTag.provider || null,
+        model: structuralInsertionTag.model || null,
+        tool: structuralInsertionTag.tool || null,
+        source: structuralInsertionTag.source || "inline-suggestion",
+        firstSeenAt: structuralInsertionTag.createdAt || now,
+        lastSeenAt: now,
+        matchType: "recent-ai-signature",
+      });
+    }
+
+    const structurallyCarriedTag = consumeBestQueuedMatch(
+      previousSignatureQueue,
+      lineRecord.signature,
+      lineRecord,
+      AI_FUZZY_MATCH_THRESHOLD
+    );
+    if (structurallyCarriedTag) {
+      return buildStoredLineTag(lineRecord, {
+        ...structurallyCarriedTag,
+        lastSeenAt: now,
+        matchType: "lineage-signature",
+      });
+    }
+
+    const similarInsertionTag = consumeBestSimilarCandidate(
+      insertionSimilarityCandidates,
+      lineRecord,
+      AI_FUZZY_MATCH_THRESHOLD
+    );
+    if (similarInsertionTag) {
+      return buildStoredLineTag(lineRecord, {
+        ai: true,
+        provider: similarInsertionTag.provider || null,
+        model: similarInsertionTag.model || null,
+        tool: similarInsertionTag.tool || null,
+        source: similarInsertionTag.source || "inline-suggestion",
+        firstSeenAt: similarInsertionTag.createdAt || now,
+        lastSeenAt: now,
+        matchType: "recent-ai-similar",
+      });
+    }
+
+    const similarCarriedTag = consumeBestSimilarCandidate(
+      previousSimilarityCandidates,
+      lineRecord,
+      AI_FUZZY_MATCH_THRESHOLD
+    );
+    if (similarCarriedTag) {
+      return buildStoredLineTag(lineRecord, {
+        ...similarCarriedTag,
+        lastSeenAt: now,
+        matchType: "lineage-similar",
+      });
+    }
+
+    return buildStoredLineTag(lineRecord, {
+      ai: false,
+      provider: null,
+      model: null,
+      tool: null,
+      source: "human-typed",
+      firstSeenAt: now,
+      lastSeenAt: now,
+      matchType: "human",
+    });
+  });
+}
+
+function buildTagQueue(lineTags) {
+  const queue = new Map();
+  for (const tag of lineTags) {
+    const hash = String(tag?.hash || "");
+    if (!hash) continue;
+    if (!queue.has(hash)) {
+      queue.set(hash, []);
+    }
+    queue.get(hash).push(tag);
+  }
+  return queue;
+}
+
+function buildMetadataQueue(entries, keyName, options = {}) {
+  const queue = new Map();
+  for (const entry of Array.isArray(entries) ? entries : []) {
+    const normalizedEntry = normalizeSimilarityCandidate(entry);
+    if (options.aiOnly && !normalizedEntry?.ai) {
+      continue;
+    }
+    const key = String(normalizedEntry?.[keyName] || "");
+    if (!key) {
+      continue;
+    }
+    if (!queue.has(key)) {
+      queue.set(key, []);
+    }
+    queue.get(key).push(normalizedEntry);
+  }
+  return queue;
+}
+
+function consumeBestQueuedMatch(queue, key, lineRecord, minScore) {
+  const items = queue.get(String(key || ""));
+  if (!items || items.length === 0) {
+    return null;
+  }
+
+  let bestIndex = -1;
+  let bestScore = minScore;
+  for (let index = 0; index < items.length; index += 1) {
+    const score = calculateLineSimilarity(lineRecord, items[index]);
+    if (score >= bestScore) {
+      bestIndex = index;
+      bestScore = score;
+    }
+  }
+
+  if (bestIndex < 0) {
+    return null;
+  }
+
+  const [entry] = items.splice(bestIndex, 1);
+  if (items.length === 0) {
+    queue.delete(String(key || ""));
+  }
+  return entry;
+}
+
+function buildInsertionQueue(insertions) {
+  const queue = new Map();
+  for (const insertion of insertions) {
+    const lineRecords = insertion.lineRecords || (insertion.lines || []).map((line) => buildLineRecord(line));
+    for (const lineRecord of lineRecords) {
+      const hash = String(lineRecord?.hash || "");
+      if (!hash) continue;
+      if (!queue.has(hash)) {
+        queue.set(hash, []);
+      }
+      queue.get(hash).push({
+        provider: insertion.provider,
+        model: insertion.model,
+        tool: insertion.tool,
+        source: insertion.source,
+        createdAt: insertion.createdAt,
+        normalized: lineRecord.normalized,
+        signature: lineRecord.signature,
+        fingerprint: lineRecord.fingerprint,
+      });
+    }
+  }
+  return queue;
+}
+
+function shiftQueuedEntry(queue, hash) {
+  const items = queue.get(hash);
+  if (!items || items.length === 0) {
+    return null;
+  }
+  const entry = items.shift();
+  if (items.length === 0) {
+    queue.delete(hash);
+  }
+  return entry;
+}
+
+function recordPendingAiInsertion(documentPath, contentText, meta) {
+  const normalizedPath = normalizePendingInsertionKey(documentPath);
+  if (!normalizedPath) {
+    return;
+  }
+
+  const lineRecords = extractMeaningfulLineRecords(contentText);
+  if (lineRecords.length === 0) {
+    return;
+  }
+
+  const nextEntries = [...getRecentAiInsertions(normalizedPath), {
+    createdAt: meta.createdAt || Date.now(),
+    provider: meta.provider || null,
+    model: meta.model || null,
+    tool: meta.tool || null,
+    source: meta.source || "inline-suggestion",
+    lineRecords,
+  }];
+  pendingAiInsertions.set(normalizedPath, nextEntries);
+}
+
+function getRecentAiInsertions(documentPath) {
+  const normalizedPath = normalizePendingInsertionKey(documentPath);
+  if (!normalizedPath) {
+    return [];
+  }
+  const now = Date.now();
+  const memoryEntries = (pendingAiInsertions.get(normalizedPath) || []).filter(
+    (entry) => now - Number(entry.createdAt || 0) <= AI_TAG_WINDOW_MS
+  );
+  if (memoryEntries.length > 0) {
+    pendingAiInsertions.set(normalizedPath, memoryEntries);
+  } else {
+    pendingAiInsertions.delete(normalizedPath);
+  }
+  const logEntries = readRecentAiInsertionsFromEventLog(normalizedPath, now);
+  return [...memoryEntries, ...logEntries];
+}
+
+function recordPendingHumanInsertion(documentPath, contentText, meta) {
+  const normalizedPath = normalizePendingInsertionKey(documentPath);
+  if (!normalizedPath) {
+    return;
+  }
+
+  const lineRecords = extractMeaningfulLineRecords(contentText);
+  if (lineRecords.length === 0) {
+    return;
+  }
+
+  totalHumanManualDetectedLines += lineRecords.length;
+
+  const nextEntries = [...getRecentHumanInsertions(normalizedPath), {
+    createdAt: meta.createdAt || Date.now(),
+    source: meta.source || "human-typed",
+    lineRecords,
+  }];
+  pendingHumanInsertions.set(normalizedPath, nextEntries);
+  log(
+    `human-session insertion: lines=${lineRecords.length} sessionHumanLines=${totalHumanManualDetectedLines} file=${path.basename(normalizedPath)} source=${meta.source || "human-typed"}`
+  );
+}
+
+function getRecentHumanInsertions(documentPath) {
+  const normalizedPath = normalizePendingInsertionKey(documentPath);
+  if (!normalizedPath) {
+    return [];
+  }
+  const now = Date.now();
+  const memoryEntries = (pendingHumanInsertions.get(normalizedPath) || []).filter(
+    (entry) => now - Number(entry.createdAt || 0) <= AI_TAG_WINDOW_MS
+  );
+  if (memoryEntries.length > 0) {
+    pendingHumanInsertions.set(normalizedPath, memoryEntries);
+  } else {
+    pendingHumanInsertions.delete(normalizedPath);
+  }
+  const logEntries = readRecentHumanInsertionsFromEventLog(normalizedPath, now);
+  return [...memoryEntries, ...logEntries];
+}
+
+function normalizePendingInsertionKey(documentPath) {
+  const rawPath = String(documentPath || "").trim();
+  if (!rawPath) {
+    return "";
+  }
+  const normalized = path.normalize(rawPath).replace(/\\/g, "/");
+  return process.platform === "win32" ? normalized.toLowerCase() : normalized;
+}
+
+function readRecentAiInsertionsFromEventLog(normalizedDocumentPath, now = Date.now()) {
+  let raw = "";
+  try {
+    raw = fs.readFileSync(LOG_PATH, "utf8");
+  } catch {
+    return [];
+  }
+
+  return raw
+    .split(/\r?\n/)
+    .slice(-RECENT_AI_LOG_SCAN_LINES)
+    .map((line) => {
+      try {
+        return JSON.parse(line);
+      } catch {
+        return null;
+      }
+    })
+    .filter(Boolean)
+    .map((entry) => buildRecentInsertionFromLogEntry(entry, normalizedDocumentPath, now))
+    .filter(Boolean);
+}
+
+function buildRecentInsertionFromLogEntry(entry, normalizedDocumentPath, now) {
+  const source = String(entry?.source || entry?.label || "");
+  const provider = String(entry?.provider || "").toLowerCase();
+  const createdAt = Date.parse(entry?.ts || entry?.timeStamp || 0);
+  if (Number.isNaN(createdAt) || now - createdAt > AI_TAG_WINDOW_MS) {
+    return null;
+  }
+
+  if (!(source === "inline-suggestion" || source === "copilot-log-completion" || entry?.label === "copilot-log-completion")) {
+    return null;
+  }
+
+  if (!provider || provider === "editor" || provider === "unknown") {
+    return null;
+  }
+
+  const entryPath = normalizePendingInsertionKey(entry?.documentPath);
+  if (!entryPath || entryPath !== normalizedDocumentPath) {
+    return null;
+  }
+
+  const contentText = String(entry?.contentText || "");
+  const lineRecords = extractMeaningfulLineRecords(contentText);
+  if (lineRecords.length === 0) {
+    return null;
+  }
+
+  return {
+    createdAt,
+    provider,
+    model: entry?.model || null,
+    tool: entry?.tool || null,
+    source: source || "inline-suggestion",
+    lineRecords,
+  };
+}
+
+function getSensitiveFileGlobs() {
+  return getCommitConfig("sensitiveFileGlobs") || DEFAULT_SENSITIVE_FILE_GLOBS;
+}
+
+function isSensitiveDocumentPath(filePath) {
+  return isIgnoredByNarrator(filePath, getSensitiveFileGlobs());
+}
+
+function readRecentHumanInsertionsFromEventLog(normalizedDocumentPath, now = Date.now()) {
+  let raw = "";
+  try {
+    raw = fs.readFileSync(LOG_PATH, "utf8");
+  } catch {
+    return [];
+  }
+
+  return raw
+    .split(/\r?\n/)
+    .slice(-RECENT_AI_LOG_SCAN_LINES)
+    .map((line) => {
+      try {
+        return JSON.parse(line);
+      } catch {
+        return null;
+      }
+    })
+    .filter(Boolean)
+    .map((entry) => buildRecentHumanInsertionFromLogEntry(entry, normalizedDocumentPath, now))
+    .filter(Boolean);
+}
+
+function buildRecentHumanInsertionFromLogEntry(entry, normalizedDocumentPath, now) {
+  const source = String(entry?.source || entry?.label || "");
+  const createdAt = Date.parse(entry?.ts || entry?.timeStamp || 0);
+  if (Number.isNaN(createdAt) || now - createdAt > AI_TAG_WINDOW_MS) {
+    return null;
+  }
+
+  if (source !== "paste-event" || String(entry?.provider || "").toLowerCase() !== "editor") {
+    return null;
+  }
+
+  const entryPath = normalizePendingInsertionKey(entry?.documentPath);
+  if (!entryPath || entryPath !== normalizedDocumentPath) {
+    return null;
+  }
+
+  const contentText = String(entry?.contentText || "");
+  const lineRecords = extractMeaningfulLineRecords(contentText);
+  if (lineRecords.length === 0) {
+    return null;
+  }
+
+  return {
+    createdAt,
+    source: "paste-event",
+    lineRecords,
+  };
+}
+
+function loadAiDetectorState(detectorPath) {
+  try {
+    const raw = fs.readFileSync(detectorPath, "utf8");
+    const parsed = JSON.parse(raw);
+    return normalizeAiDetectorState(parsed);
+  } catch (error) {
+    if (error.code !== "ENOENT") {
+      log(`AI detector load failed: ${error.message}`);
+    }
+    return normalizeAiDetectorState(null);
+  }
+}
+
+function normalizeAiDetectorState(value) {
+  const parsed = value && typeof value === "object" ? value : {};
+  return {
+    version: AI_DETECTOR_VERSION,
+    updatedAt: parsed.updatedAt || null,
+    files: normalizeStoredAiFiles(parsed.files),
+    commits: Array.isArray(parsed.commits) ? parsed.commits : [],
+  };
+}
+
+function createEmptyFileState(languageId) {
+  return {
+    languageId: languageId || "unknown",
+    updatedAt: null,
+    totalMeaningfulLines: 0,
+    aiTaggedLines: 0,
+    aiShare: 0,
+    dominantOrigin: "human",
+    lineTags: [],
+  };
+}
+
+function normalizeStoredAiFiles(files) {
+  const normalizedFiles = {};
+  for (const [filePath, fileState] of Object.entries(files && typeof files === "object" ? files : {})) {
+    normalizedFiles[filePath] = {
+      ...createEmptyFileState(fileState?.languageId || "unknown"),
+      ...(fileState && typeof fileState === "object" ? fileState : {}),
+      lineTags: Array.isArray(fileState?.lineTags) ? fileState.lineTags.map(normalizeStoredLineTag) : [],
+    };
+  }
+  return normalizedFiles;
+}
+
+function normalizeStoredLineTag(tag) {
+  const lineRecord = buildLineRecord(tag?.normalized || tag?.preview || "");
+  return {
+    hash: tag?.hash || lineRecord.hash,
+    preview: tag?.preview || lineRecord.preview,
+    normalized: tag?.normalized || lineRecord.normalized,
+    signature: tag?.signature || lineRecord.signature,
+    fingerprint: tag?.fingerprint || lineRecord.fingerprint,
+    ai: Boolean(tag?.ai),
+    provider: tag?.provider || null,
+    model: tag?.model || null,
+    tool: tag?.tool || null,
+    source: tag?.source || (tag?.ai ? "inline-suggestion" : "human-typed"),
+    firstSeenAt: tag?.firstSeenAt || null,
+    lastSeenAt: tag?.lastSeenAt || null,
+    matchType: tag?.matchType || (tag?.ai ? "exact" : "human"),
+  };
+}
+
+function buildStoredLineTag(lineRecord, meta) {
+  return {
+    hash: lineRecord.hash,
+    preview: lineRecord.preview,
+    normalized: lineRecord.normalized,
+    signature: lineRecord.signature,
+    fingerprint: lineRecord.fingerprint,
+    ai: Boolean(meta?.ai),
+    provider: meta?.provider || null,
+    model: meta?.model || null,
+    tool: meta?.tool || null,
+    source: meta?.source || (meta?.ai ? "inline-suggestion" : "human-typed"),
+    firstSeenAt: meta?.firstSeenAt || null,
+    lastSeenAt: meta?.lastSeenAt || null,
+    matchType: meta?.matchType || (meta?.ai ? "exact" : "human"),
+  };
+}
+
+function buildSimilarityCandidates(entries, options = {}) {
+  return (Array.isArray(entries) ? entries : [])
+    .filter((entry) => !options.aiOnly || entry?.ai)
+    .map((entry) => normalizeSimilarityCandidate(entry))
+    .filter((entry) => entry.hash || entry.signature || entry.normalized);
+}
+
+function normalizeSimilarityCandidate(entry) {
+  const lineRecord = buildLineRecord(entry?.normalized || entry?.preview || "");
+  return {
+    ...entry,
+    hash: entry?.hash || lineRecord.hash,
+    normalized: entry?.normalized || lineRecord.normalized,
+    signature: entry?.signature || lineRecord.signature,
+    fingerprint: entry?.fingerprint || lineRecord.fingerprint,
+  };
+}
+
+function consumeBestSimilarCandidate(candidates, lineRecord, minScore) {
+  if (!Array.isArray(candidates) || candidates.length === 0) {
+    return null;
+  }
+
+  let bestIndex = -1;
+  let bestScore = minScore;
+  for (let index = 0; index < candidates.length; index += 1) {
+    const score = calculateLineSimilarity(lineRecord, candidates[index]);
+    if (score >= bestScore) {
+      bestIndex = index;
+      bestScore = score;
+    }
+  }
+
+  if (bestIndex < 0) {
+    return null;
+  }
+
+  return candidates.splice(bestIndex, 1)[0];
+}
+
+function calculateLineSimilarity(left, right) {
+  const leftRecord = normalizeSimilarityCandidate(left);
+  const rightRecord = normalizeSimilarityCandidate(right);
+  if (leftRecord.hash && rightRecord.hash && leftRecord.hash === rightRecord.hash) {
+    return 1;
+  }
+
+  const exactSignatureMatch =
+    leftRecord.signature &&
+    rightRecord.signature &&
+    leftRecord.signature === rightRecord.signature;
+  const exactFingerprintMatch =
+    leftRecord.fingerprint &&
+    rightRecord.fingerprint &&
+    leftRecord.fingerprint === rightRecord.fingerprint;
+  const tokenScore = calculateTokenOverlap(leftRecord.fingerprint, rightRecord.fingerprint);
+  const charScore = calculateCharacterOverlap(leftRecord.normalized, rightRecord.normalized);
+  const weightedScore = (tokenScore * 0.7) + (charScore * 0.3);
+
+  if (exactSignatureMatch && (tokenScore >= 0.5 || charScore >= 0.55)) {
+    return Math.max(weightedScore, 0.92);
+  }
+
+  if (exactFingerprintMatch && charScore >= 0.45) {
+    return Math.max(weightedScore, 0.84);
+  }
+
+  return weightedScore;
+}
+
+function calculateTokenOverlap(leftFingerprint, rightFingerprint) {
+  const left = new Set(String(leftFingerprint || "").split("|").filter(Boolean));
+  const right = new Set(String(rightFingerprint || "").split("|").filter(Boolean));
+  if (left.size === 0 || right.size === 0) {
+    return 0;
+  }
+
+  let overlap = 0;
+  for (const token of left) {
+    if (right.has(token)) {
+      overlap += 1;
+    }
+  }
+  return overlap / Math.max(left.size, right.size);
+}
+
+function calculateCharacterOverlap(leftValue, rightValue) {
+  const left = String(leftValue || "");
+  const right = String(rightValue || "");
+  if (!left || !right) {
+    return 0;
+  }
+  if (left === right) {
+    return 1;
+  }
+
+  const shortestLength = Math.min(left.length, right.length);
+  let samePrefix = 0;
+  while (samePrefix < shortestLength && left[samePrefix] === right[samePrefix]) {
+    samePrefix += 1;
+  }
+
+  let sameSuffix = 0;
+  while (
+    sameSuffix < shortestLength &&
+    left[left.length - 1 - sameSuffix] === right[right.length - 1 - sameSuffix]
+  ) {
+    sameSuffix += 1;
+  }
+
+  return (samePrefix + sameSuffix) / (left.length + right.length);
+}
+
+function buildLineRecord(value) {
+  const normalized = normalizeWhitespace(value);
+  return {
+    normalized,
+    hash: hashContent(normalized),
+    signature: createStructuralSignature(normalized),
+    fingerprint: createTokenFingerprint(normalized),
+    preview: buildPreview(normalized),
+  };
+}
+
+function createStructuralSignature(value) {
+  return normalizeWhitespace(value)
+    .toLowerCase()
+    .replace(/\b0x[a-f0-9]+\b/gi, "<num>")
+    .replace(/\b\d+(?:\.\d+)?\b/g, "<num>")
+    .replace(/(["'`])(?:\\.|(?!\1).)*\1/g, "<str>");
+}
+
+function createTokenFingerprint(value) {
+  return [...new Set(
+    createStructuralSignature(value).match(/[a-z_][a-z0-9_$]*/gi) || []
+  )]
+    .map((token) => token.toLowerCase())
+    .sort()
+    .slice(0, 24)
+    .join("|");
+}
+
+function getWorkspaceRootForUri(uri) {
+  const documentPath = uri?.fsPath || "";
+  const repoRoot = findGitRootForPath(documentPath);
+  if (repoRoot) {
+    return repoRoot;
+  }
+  const folder = vscode.workspace.getWorkspaceFolder(uri);
+  return folder?.uri?.fsPath || null;
+}
+
+function getPreferredRepoRoot() {
+  const activeDocumentPath = vscode.window.activeTextEditor?.document?.uri?.fsPath;
+  const activeRepoRoot = findGitRootForPath(activeDocumentPath);
+  if (activeRepoRoot) {
+    return activeRepoRoot;
+  }
+  return getWorkspaceRepoRoots()[0] || null;
+}
+
+function getWorkspaceRepoRoots() {
+  const roots = new Set();
+  for (const folder of vscode.workspace.workspaceFolders || []) {
+    for (const repoRoot of discoverGitRepos(folder.uri.fsPath, REPO_DISCOVERY_MAX_DEPTH)) {
+      roots.add(repoRoot);
+    }
+  }
+  return [...roots];
+}
+
+function discoverGitRepos(rootPath, remainingDepth) {
+  const normalizedRoot = String(rootPath || "");
+  if (!normalizedRoot || !fs.existsSync(normalizedRoot)) {
+    return [];
+  }
+
+  if (hasGitMetadata(normalizedRoot)) {
+    return [normalizedRoot];
+  }
+
+  if (remainingDepth <= 0) {
+    return [];
+  }
+
+  let entries = [];
+  try {
+    entries = fs.readdirSync(normalizedRoot, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+
+  const discovered = [];
+  for (const entry of entries) {
+    if (!entry.isDirectory()) {
+      continue;
+    }
+    if ([".git", "node_modules", "dist", "build", ".next"].includes(entry.name)) {
+      continue;
+    }
+    discovered.push(...discoverGitRepos(path.join(normalizedRoot, entry.name), remainingDepth - 1));
+  }
+  return discovered;
+}
+
+function findGitRootForPath(targetPath) {
+  const normalizedPath = String(targetPath || "");
+  if (!normalizedPath) {
+    return null;
+  }
+
+  let current = normalizedPath;
+  try {
+    const stats = fs.statSync(normalizedPath);
+    if (stats.isFile()) {
+      current = path.dirname(normalizedPath);
+    }
+  } catch {
+    current = path.dirname(normalizedPath);
+  }
+
+  while (current && current !== path.dirname(current)) {
+    if (hasGitMetadata(current)) {
+      return current;
+    }
+    current = path.dirname(current);
+  }
+
+  return hasGitMetadata(current) ? current : null;
+}
+
+function hasGitMetadata(targetPath) {
+  try {
+    return fs.existsSync(path.join(targetPath, ".git"));
+  } catch {
+    return false;
+  }
+}
+
+async function buildPreviewDiffText(repoRoot) {
+  const stagedDiff = await runGit(["diff", "--cached", "--unified=0"], repoRoot).catch(() => "");
+  const workingDiff = await runGit(["diff", "--unified=0"], repoRoot).catch(() => "");
+  const untrackedDiffs = await readUntrackedFileDiffs(repoRoot);
+  return [stagedDiff, workingDiff, ...untrackedDiffs].filter(Boolean).join("\n");
+}
+
+async function readUntrackedFileDiffs(repoRoot) {
+  const output = await runGit(["ls-files", "--others", "--exclude-standard"], repoRoot).catch(() => "");
+  const filePaths = output.split(/\r?\n/).map((value) => value.trim()).filter(Boolean);
+  const diffs = [];
+
+  for (const relativePath of filePaths) {
+    const fullPath = path.join(repoRoot, relativePath);
+    let stats;
+    try {
+      stats = fs.statSync(fullPath);
+    } catch {
+      continue;
+    }
+
+    if (!stats.isFile() || stats.size > UNTRACKED_PREVIEW_MAX_BYTES) {
+      continue;
+    }
+
+    let content = "";
+    try {
+      content = fs.readFileSync(fullPath, "utf8");
+    } catch {
+      continue;
+    }
+
+    if (content.includes("\u0000")) {
+      continue;
+    }
+
+    diffs.push(createUntrackedFileDiff(relativePath, content));
+  }
+
+  return diffs;
+}
+
+function createUntrackedFileDiff(filePath, content) {
+  const normalizedPath = normalizeTrackedPath(filePath);
+  const lines = splitLines(content);
+  return [
+    `diff --git a/${normalizedPath} b/${normalizedPath}`,
+    "new file mode 100644",
+    "--- /dev/null",
+    `+++ b/${normalizedPath}`,
+    `@@ -0,0 +1,${lines.length} @@`,
+    ...lines.map((line) => `+${line}`),
+  ].join("\n");
+}
+
+function normalizeTrackedPath(value) {
+  return String(value || "").replace(/\\/g, "/");
+}
+
+function inferInsertionProvider(source, options = {}) {
+  if (options.isSensitiveDocument) {
+    return null;
+  }
+  if (source === "inline-suggestion") {
+    return detectProviderFromText(`${currentTool()} ${lastDetectedModel || ""}`) || "copilot";
+  }
+  return null;
+}
+
+function detectProviderFromText(value) {
+  const text = String(value || "").toLowerCase();
+  if (text.includes("copilot")) return "copilot";
+  if (text.includes("codex") || text.includes("gpt") || text.includes("openai") || text.includes("chatgpt")) return "openai";
+  if (text.includes("claude") || text.includes("anthropic")) return "anthropic";
+  if (text.includes("gemini") || text.includes("google")) return "google";
+  return null;
+}
+
+// === Text Processing ===
+
+// Normalize whitespace by collapsing multiple spaces/tabs and trimming
+function normalizeWhitespace(value) {
+  return String(value || "").replace(/\s+/g, " ").trim();
+}
+
+// Create preview string (truncate to 180 chars if needed)
+function buildPreview(value) {
+  const text = normalizeWhitespace(value);
+  return text.length > 180 ? `${text.slice(0, 177)}...` : text; // Truncate with ellipsis
+}
+
+// Extract added line samples from diff output
+function extractAddedLineSamples(diffText, limit = 2) {
+  return String(diffText || "")
+    .split(/\r?\n/)
+    .filter((line) => line.startsWith("+") && !line.startsWith("+++")) // Added lines (not header)
+    .map((line) => normalizeWhitespace(line.slice(1))) // Remove leading +
+    .filter(Boolean) // Skip empty lines
+    .slice(0, Math.max(0, limit));
+}
+
+function extractAddedLinesByFile(diffText) {
+  const added = [];
+  let currentFile = null;
+  for (const line of String(diffText || "").split(/\r?\n/)) {
+    if (line.startsWith("+++ ")) {
+      const filePath = line.replace(/^(\+\+\+\s+)/, "").trim();
+      if (filePath === "/dev/null") {
+        currentFile = null;
+        continue;
+      }
+      currentFile = normalizeTrackedPath(filePath.replace(/^b\//, ""));
+      continue;
+    }
+    if (line.startsWith("diff --git ")) {
+      currentFile = null;
+      continue;
+    }
+    if (currentFile && line.startsWith("+") && !line.startsWith("+++")) {
+      added.push({ filePath: currentFile, line: line.slice(1) });
+    }
+  }
+  return added;
+}
+
+function countRawAddedDiffLines(diffText) {
+  return extractAddedLinesByFile(diffText).length;
+}
+
+function buildCopilotAccumulatorSummary(gitAddedLines, humanLines = 0) {
+  const totalAdded = Math.max(0, Number(gitAddedLines) || 0);
+  const copilotLines = Math.max(0, Number(totalCopilotLogDetectedLines) || 0);
+  const trackedHumanLines = Math.max(0, Number(humanLines) || 0);
+  const totalTrackedLines = copilotLines + trackedHumanLines;
+  const ratio = totalTrackedLines > 0 ? Number(((copilotLines / totalTrackedLines) * 100).toFixed(1)) : 0;
+  return {
+    copilotLines,
+    gitAddedLines: totalAdded,
+    humanLines: trackedHumanLines,
+    totalTrackedLines,
+    ratioPct: ratio,
+    events: totalCopilotLogEvents,
+  };
+}
+
+function buildSessionLineMonitorSummary(gitAddedLines = 0) {
+  return buildCopilotAccumulatorSummary(gitAddedLines, totalHumanManualDetectedLines);
+}
+
+function logCopilotAccumulatorSummary(label, gitAddedLines, humanLines = 0) {
+  const summary = buildCopilotAccumulatorSummary(gitAddedLines, humanLines);
+  log(
+    `${label}: copilotLines=${summary.copilotLines} humanLines=${summary.humanLines} trackedLines=${summary.totalTrackedLines} ratio=${summary.ratioPct}% gitAddedLines=${summary.gitAddedLines} events=${summary.events}`
+  );
+}
+
+function resetCommitSessionMonitors(reason) {
+  log(
+    `Reset commit session: reason=${reason} copilotLines=${totalCopilotLogDetectedLines} manualHumanLines=${totalHumanManualDetectedLines} addedLines=${totalNewlyAddedLines} events=${totalCopilotLogEvents}`
+  );
+  log(
+    `Reset Copilot monitor: reason=${reason} lastSessionLines=${totalCopilotLogDetectedLines} lastSessionEvents=${totalCopilotLogEvents}`
+  );
+  totalCopilotLogDetectedLines = 0;
+  totalCopilotLogEvents = 0;
+  totalHumanManualDetectedLines = 0;
+  totalNewlyAddedLines = 0;
+  addedLinesPerSession.clear();
+  pendingAiInsertions.clear();
+  pendingHumanInsertions.clear();
+  log(`Commit session restarted: copilotLines=0 manualHumanLines=0 addedLines=0 events=0`);
+}
+
+function computeAiShareForDiff(diffText, repoRoot) {
+  const detectorPath = path.join(repoRoot, AI_DETECTOR_FILE);
+  const detector = loadAiDetectorState(detectorPath);
+  const addedLines = extractAddedLinesByFile(diffText);
+  const tagIndex = new Map();
+
+  for (const [filePath, fileState] of Object.entries(detector.files || {})) {
+    if (!fileState?.lineTags) continue;
+    const tags = new Map();
+    for (const tag of fileState.lineTags) {
+      if (tag?.hash) {
+        if (!tags.has(tag.hash)) {
+          tags.set(tag.hash, []);
+        }
+        tags.get(tag.hash).push(tag);
+      }
+    }
+    tagIndex.set(normalizeTrackedPath(filePath), tags);
+  }
+
+  let total = 0;
+  let ai = 0;
+  let humanTyped = 0;
+  let humanPasted = 0;
+  let unknown = 0;
+
+  for (const entry of addedLines) {
+    if (!isMeaningfulContentLine(entry.line)) {
+      continue;
+    }
+    const hash = hashContent(entry.line);
+    if (!hash) {
+      continue;
+    }
+    total += 1;
+    const tags = tagIndex.get(normalizeTrackedPath(entry.filePath));
+    const tag = shiftQueuedEntry(tags, hash);
+    if (tag && tag.ai) {
+      ai += 1;
+    } else if (tag?.source === "paste-event") {
+      humanPasted += 1;
+    } else if (tag) {
+      humanTyped += 1;
+    } else {
+      unknown += 1;
+    }
+  }
+
+  const observedHuman = humanTyped + humanPasted;
+  const inferredHuman = Math.max(total - ai, 0);
+  const aiPct = total > 0 ? Math.round((ai / total) * 100) : 0;
+  const observedHumanPct = total > 0 ? Math.round((observedHuman / total) * 100) : 0;
+  const inferredHumanPct = total > 0 ? Math.round((inferredHuman / total) * 100) : 0;
+
+  return {
+    totalMeaningfulAdded: total,
+    aiTagged: ai,
+    humanTagged: observedHuman,
+    humanTypedTagged: humanTyped,
+    humanPastedTagged: humanPasted,
+    unknownTagged: unknown,
+    aiPct,
+    humanPct: inferredHumanPct,
+    observedHumanPct,
+    inferredHuman,
+  };
+}
+
+async function getWorkingTreeLineageSummary(repoRoot) {
+  const diffText = await buildPreviewDiffText(repoRoot);
+  const share = computeAiShareForDiff(diffText, repoRoot);
+  return {
+    gitAddedLines: share.totalMeaningfulAdded || 0,
+    aiLines: share.aiTagged || 0,
+    userTypedLines: share.humanTypedTagged || 0,
+    userPastedLines: share.humanPastedTagged || 0,
+    observedHumanLines: share.humanTagged || 0,
+    inferredHumanLines: share.inferredHuman || 0,
+    unknownLines: share.unknownTagged || 0,
+    aiPct: share.aiPct || 0,
+    observedHumanPct: share.observedHumanPct || 0,
+    inferredHumanPct: share.humanPct || 0,
+  };
+}
+
+// Compute SHA256 hash of normalized text
+function hashContent(value) {
+  const normalized = normalizeWhitespace(value);
+  return normalized ? `sha256:${crypto.createHash("sha256").update(normalized).digest("hex")}` : null;
+}
+
+function extractMeaningfulLineRecords(value) {
+  return String(value || "")
+    .split(/\r?\n/)
+    .map(normalizeWhitespace)
+    .filter(isMeaningfulContentLine)
+    .map((line) => buildLineRecord(line));
+}
+
+function extractMeaningfulContentLines(value) {
+  return extractMeaningfulLineRecords(value).map((entry) => entry.normalized);
+}
+
+function isMeaningfulContentLine(line) {
+  const value = normalizeWhitespace(line);
+  if (!value) {
+    return false;
+  }
+  if (/^[{}()[\];,]+$/.test(value)) {
+    return false;
+  }
+  return true;
+}
+
+// === I/O and Logging ===
+
+// Safely read clipboard content, return empty string if access denied
+async function readClipboardSafe() {
+  try { return await vscode.env.clipboard.readText(); } catch { return ""; }
+}
+
+// Log message with timestamp to VS Code output channel
+function log(message) {
+  outputChannel?.appendLine(`[${new Date().toISOString()}] ${message}`);
+}
+
+// Remove trailing slash from URL for consistent formatting
+function trimSlash(value) {
+  return String(value || "").replace(/\/$/, "");
+}
+
+// Fetch and parse JSON from URL with error handling
+async function fetchJson(url, options) {
+  const response = await fetch(url, options);
+  if (!response.ok) throw new Error(`${response.status} ${response.statusText}`);
+  return response.json();
+}
+
+// Execute git command and return stdout
+function runGit(args, cwd) {
+  return new Promise((resolve, reject) => {
+    execFile("git", args, { cwd, encoding: "utf8" }, (error, stdout) => {
+      if (error) {
+        reject(error);
+        return;
+      }
+      resolve(stdout);
+    });
+  });
+}
+
+// Extract code completion content from Copilot log lines
+// Copilot logs may contain completions in various JSON-ish formats
+function extractCodeFromCopilotLogLine(line) {
+  const normalizedLine = String(line || "");
+
+  // Pattern 1: "solution":["<code>"] or "solutions":["<code>"]
+  const solutionMatch = normalizedLine.match(/"solutions?":\s*\["([^"]+)"\]/);
+  if (solutionMatch && solutionMatch[1] && solutionMatch[1].length > 8) {
+    return unescapeLogString(solutionMatch[1]);
+  }
+
+  // Pattern 2: "completion":"<code>" or "completionText":"<code>"
+  const completionMatch = normalizedLine.match(/"completion(?:Text)?":\s*"([^"]{10,})"/);
+  if (completionMatch && completionMatch[1]) {
+    return unescapeLogString(completionMatch[1]);
+  }
+
+  // Pattern 3: "displayText":"<code>"
+  const displayMatch = normalizedLine.match(/"displayText":\s*"([^"]{10,})"/);
+  if (displayMatch && displayMatch[1]) {
+    return unescapeLogString(displayMatch[1]);
+  }
+
+  // Pattern 4: "insertText":"<code>"
+  const insertMatch = normalizedLine.match(/"insertText":\s*"([^"]{10,})"/);
+  if (insertMatch && insertMatch[1]) {
+    return unescapeLogString(insertMatch[1]);
+  }
+
+  // Pattern 5: "text":"<code>" in contexts that look like completions
+  if (/complet|suggest|inline|ghost/i.test(normalizedLine)) {
+    const textMatch = normalizedLine.match(/"text":\s*"([^"]{10,})"/);
+    if (textMatch && textMatch[1]) {
+      return unescapeLogString(textMatch[1]);
+    }
+  }
+
+  return null;
+}
+
+// Unescape JSON-encoded strings from log output
+function unescapeLogString(value) {
+  try {
+    return JSON.parse(`"${value}"`);
+  } catch {
+    return String(value || "")
+      .replace(/\\n/g, "\n")
+      .replace(/\\t/g, "\t")
+      .replace(/\\"/g, '"');
+  }
+}
+
+// Extract changed file paths from unified diff text
+function extractChangedFilePathsFromDiff(diffText) {
+  const files = new Set();
+  for (const rawLine of String(diffText || "").split(/\r?\n/)) {
+    if (rawLine.startsWith("+++ ")) {
+      const pathValue = rawLine.slice(4).trim();
+      if (pathValue && pathValue !== "/dev/null") {
+        const normalized = pathValue.replace(/^b\//, "").replace(/\\/g, "/");
+        if (normalized) {
+          files.add(normalized);
+        }
+      }
+    }
+  }
+  return [...files];
+}
+
+module.exports = { activate, deactivate };
+
+//fjskdfsklfj
+//dsjfslkjfklsjf
+//sdjfklsjfklksjflk

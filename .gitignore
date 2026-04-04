@@ -1,0 +1,14 @@
+node_modules/
+dist/
+build/
+.env
+.env.local
+.aidetector.json
+**/.aidetector.json
+*.log
+backend/data/
+**/node_modules/
+**/dist/
+**/build/
+**/.turbo/
+**/.vite/

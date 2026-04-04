@@ -1,0 +1,108 @@
+import { spawn } from "node:child_process";
+import { createRequire } from "node:module";
+import net from "node:net";
+import path from "node:path";
+import process from "node:process";
+import { fileURLToPath } from "node:url";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const require = createRequire(import.meta.url);
+const { loadProjectEnv } = require("./env-loader.cjs");
+const projectRoot = path.resolve(__dirname, "..");
+loadProjectEnv(projectRoot);
+const narratorRoot = path.join(
+  projectRoot,
+  "living-codebase-narrator",
+  "living-codebase-narrator",
+  "living-codebase-narrator"
+);
+
+const modes = {
+  narrator: [
+    { name: "narrator-backend", cwd: path.join(narratorRoot, "apps", "backend"), color: "\u001b[36m", port: 8787 },
+    { name: "narrator-web", cwd: path.join(narratorRoot, "apps", "web"), color: "\u001b[35m" },
+  ],
+  all: [
+    { name: "hackbyte-backend", cwd: path.join(projectRoot, "backend"), color: "\u001b[32m", port: 4000 },
+    { name: "hackbyte-frontend", cwd: path.join(projectRoot, "frontend"), color: "\u001b[33m" },
+    { name: "narrator-backend", cwd: path.join(narratorRoot, "apps", "backend"), color: "\u001b[36m", port: 8787 },
+    { name: "narrator-web", cwd: path.join(narratorRoot, "apps", "web"), color: "\u001b[35m" },
+  ],
+};
+
+const mode = process.argv[2] || "narrator";
+const services = modes[mode];
+
+if (!services) {
+  console.error(`Unknown mode: ${mode}`);
+  process.exit(1);
+}
+
+const children = [];
+let shuttingDown = false;
+
+for (const service of services) {
+  if (service.port && (await isPortInUse(service.port))) {
+    process.stdout.write(
+      `${service.color}[${service.name}]\u001b[0m port ${service.port} is already in use, assuming this service is already running and skipping a duplicate start.\n`
+    );
+    continue;
+  }
+
+  const child = spawn("npm", ["run", "dev"], {
+    cwd: service.cwd,
+    shell: true,
+    stdio: "pipe",
+    env: process.env,
+  });
+
+  for (const stream of [child.stdout, child.stderr]) {
+    stream.on("data", (chunk) => {
+      for (const line of String(chunk).split(/\r?\n/)) {
+        if (line) {
+          process.stdout.write(`${service.color}[${service.name}]\u001b[0m ${line}\n`);
+        }
+      }
+    });
+  }
+
+  child.on("exit", (code, signal) => {
+    if (!shuttingDown && ((code && code !== 0) || signal)) {
+      shutdown(code || 1);
+    }
+  });
+
+  children.push(child);
+}
+
+process.on("SIGINT", () => shutdown(0));
+process.on("SIGTERM", () => shutdown(0));
+
+function shutdown(exitCode) {
+  if (shuttingDown) {
+    return;
+  }
+  shuttingDown = true;
+  for (const child of children) {
+    if (!child.killed) {
+      child.kill();
+    }
+  }
+  process.exit(exitCode);
+}
+
+function isPortInUse(port) {
+  return new Promise((resolve) => {
+    const socket = net.createConnection({ host: "127.0.0.1", port });
+
+    socket.once("connect", () => {
+      socket.end();
+      resolve(true);
+    });
+
+    socket.once("error", () => {
+      resolve(false);
+    });
+  });
+}

@@ -1,0 +1,48 @@
+services:
+  - type: web
+    name: lcn-backend
+    runtime: node
+    plan: free
+    rootDir: .
+    buildCommand: npm install && npm run build --workspace @lcn/backend
+    startCommand: npm run start --workspace @lcn/backend
+    healthCheckPath: /health
+    envVars:
+      - key: NODE_VERSION
+        value: 20
+      - key: LCN_PUBLIC_BASE_URL
+        sync: false
+      - key: MONGODB_URI
+        sync: false
+      - key: LCN_MONGODB_DB
+        value: living_codebase_narrator
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: GEMINI_MODEL
+        value: gemini-2.5-flash-lite
+      - key: HF_TOKEN
+        sync: false
+      - key: HF_MODEL
+        value: Qwen/Qwen2.5-Coder-32B-Instruct
+      - key: ELEVENLABS_API_KEY
+        sync: false
+      - key: ELEVENLABS_VOICE_ID
+        value: 21m00Tcm4TlvDq8ikWAM
+      - key: NARRATOR_HEADING_PREFIX
+        value: Latest code update.
+
+  - type: web
+    name: lcn-web
+    runtime: static
+    rootDir: .
+    buildCommand: npm install && npm run build --workspace @lcn/web
+    staticPublishPath: apps/web/dist
+    envVars:
+      - key: NODE_VERSION
+        value: 20
+      - key: VITE_LCN_API_BASE_URL
+        sync: false
+      - key: VITE_APP_BACKEND_URL
+        sync: false
+      - key: VITE_APP_FRONTEND_URL
+        sync: false

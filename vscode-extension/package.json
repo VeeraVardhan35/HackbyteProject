@@ -1,0 +1,180 @@
+{
+  "name": "hackbyte-code-narrator",
+  "displayName": "Hackbyte Code Narrator",
+  "description": "Combines Commit Confessional background detection with Living Codebase Narrator live docs UI.",
+  "version": "0.1.0",
+  "publisher": "local",
+  "license": "UNLICENSED",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "scripts": {
+    "package:vsix": "npx @vscode/vsce package --out ../dist/hackbyte-code-narrator.vsix --allow-missing-repository --allow-star-activation",
+    "publish:marketplace": "npx @vscode/vsce publish --allow-missing-repository --allow-star-activation",
+    "publish:openvsx": "npx ovsx publish"
+  },
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "*"
+  ],
+  "main": "./extension.js",
+  "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "lcn",
+          "title": "Narrator",
+          "icon": "media/icon.svg"
+        }
+      ]
+    },
+    "views": {
+      "lcn": [
+        {
+          "type": "webview",
+          "id": "lcn.sidebar",
+          "name": "Live Docs"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "commitConfessional.showOutput",
+        "title": "Commit Confessional: Show Output"
+      },
+      {
+        "command": "commitConfessional.inspectAiExtensions",
+        "title": "Commit Confessional: Inspect AI Extensions"
+      },
+      {
+        "command": "commitConfessional.listMatchingExtensions",
+        "title": "Commit Confessional: List Matching AI Extensions"
+      },
+      {
+        "command": "commitConfessional.debugStatus",
+        "title": "Commit Confessional: Debug Status Report"
+      },
+      {
+        "command": "commitConfessional.connectGithub",
+        "title": "Commit Confessional: Connect GitHub"
+      },
+      {
+        "command": "commitConfessional.showAddedLinesStats",
+        "title": "Commit Confessional: Show Added Lines Stats"
+      },
+      {
+        "command": "commitConfessional.showCopilotLogStats",
+        "title": "Commit Confessional: Show Copilot Log Stats"
+      },
+      {
+        "command": "commitConfessional.testLatestReceipt",
+        "title": "Commit Confessional: Test Latest Receipt"
+      },
+      {
+        "command": "commitConfessional.previewAiPercentage",
+        "title": "Commit Confessional: Preview AI Percentage"
+      },
+      {
+        "command": "lcn.pingBackend",
+        "title": "LCN: Ping Backend"
+      },
+      {
+        "command": "lcn.showLog",
+        "title": "LCN: Show Output Log"
+      }
+    ],
+    "configuration": {
+      "title": "Hackbyte Code Narrator",
+      "properties": {
+        "commitConfessional.backendUrl": {
+          "type": "string",
+          "default": "http://127.0.0.1:4000/api/extension/events",
+          "description": "Local backend URL that receives extension events."
+        },
+        "commitConfessional.aiExtensions": {
+          "type": "array",
+          "default": [
+            "GitHub.copilot",
+            "GitHub.copilot-chat",
+            "OpenAI.chatgpt",
+            "openai.chatgpt",
+            "openai.codex"
+          ],
+          "items": {
+            "type": "string"
+          },
+          "description": "VS Code extension IDs to watch for activation."
+        },
+        "commitConfessional.promptWindowMs": {
+          "type": "number",
+          "default": 60000,
+          "description": "How long a recent paste or prompt-like edit is considered relevant when correlating AI activation."
+        },
+        "commitConfessional.pasteMinLength": {
+          "type": "number",
+          "default": 12,
+          "description": "Minimum inserted text length before a clipboard match is treated as a paste event."
+        },
+        "commitConfessional.sensitiveFileGlobs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "**/.env",
+            "**/.env.*",
+            "**/*.pem",
+            "**/*.key",
+            "**/*.p12",
+            "**/*.pfx",
+            "**/id_rsa",
+            "**/id_dsa",
+            "**/id_ecdsa",
+            "**/id_ed25519",
+            "**/*.crt",
+            "**/*.cer"
+          ],
+          "description": "Glob patterns treated as sensitive. For these files, paste payloads and previews are redacted and editor pastes are never attributed to AI providers."
+        },
+        "lcn.backendUrl": {
+          "type": "string",
+          "default": "http://localhost:8787",
+          "description": "Narrator backend base URL."
+        },
+        "lcn.debounceMs": {
+          "type": "number",
+          "default": 5000,
+          "minimum": 250,
+          "description": "Debounce window after saves before emitting a narrator delta."
+        },
+        "lcn.minChangedLines": {
+          "type": "number",
+          "default": 1,
+          "minimum": 0,
+          "description": "Skip edits with fewer changed lines than this threshold for narrator events."
+        },
+        "lcn.ignoreGlobs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [
+            "**/node_modules/**",
+            "**/dist/**",
+            "**/build/**",
+            "**/.next/**",
+            "**/.git/**",
+            "**/*.map",
+            "**/*lock*.json",
+            "**/package-lock.json",
+            "**/pnpm-lock.yaml",
+            "**/yarn.lock"
+          ],
+          "description": "Glob patterns ignored by the narrator save pipeline."
+        }
+      }
+    }
+  }
+}
