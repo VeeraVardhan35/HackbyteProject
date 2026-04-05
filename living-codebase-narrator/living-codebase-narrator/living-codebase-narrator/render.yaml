@@ -42,7 +42,3 @@ services:
         value: 20
       - key: VITE_LCN_API_BASE_URL
         sync: false
-      - key: VITE_APP_BACKEND_URL
-        sync: false
-      - key: VITE_APP_FRONTEND_URL
-        sync: false

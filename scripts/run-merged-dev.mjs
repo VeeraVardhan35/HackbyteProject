@@ -50,11 +50,21 @@ for (const service of services) {
     continue;
   }
 
+  const childEnv = { ...process.env };
+  if (service.name === "hackbyte-backend" && service.port) {
+    childEnv.PORT = String(service.port);
+  }
+  if (service.name === "narrator-backend" && service.port) {
+    delete childEnv.PORT;
+    childEnv.LCN_PORT = String(service.port);
+    childEnv.NARRATOR_PORT = String(service.port);
+  }
+
   const child = spawn("npm", ["run", "dev"], {
     cwd: service.cwd,
     shell: true,
     stdio: "pipe",
-    env: process.env,
+    env: childEnv,
   });
 
   for (const stream of [child.stdout, child.stderr]) {

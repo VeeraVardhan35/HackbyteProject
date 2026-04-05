@@ -159,6 +159,7 @@ export async function recordCommitInAiDetector(projectRoot, receipt, diffText = 
     copilotPercentage: Number(receipt?.copilotContribution?.estimatedAiPercentage || receipt?.modelEvidence?.copilotContribution?.estimatedAiPercentage || 0),
     certainty: receipt?.modelEvidence?.certainty || "NONE",
     method: receipt?.modelEvidence?.method || "none",
+    model: receipt?.modelEvidence?.model || null,
     semgrepFindingCount: Number(receipt?.semgrep?.findingCount || 0),
     files,
   };

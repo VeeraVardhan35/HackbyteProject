@@ -27,6 +27,8 @@
     "receipt:preview": "node scripts/preview-receipt.js",
     "preview:ai": "node scripts/preview-receipt.js",
     "test:latest-receipt": "node scripts/post-commit-receipt.js",
-    "security:audit:deps": "npm audit --json && npm audit --json --prefix living-codebase-narrator/living-codebase-narrator/living-codebase-narrator"
+    "security:audit:deps": "npm audit --json && npm audit --json --prefix living-codebase-narrator/living-codebase-narrator/living-codebase-narrator",
+    "security:audit:semgrep": "powershell -ExecutionPolicy Bypass -File ./scripts/run-semgrep.ps1",
+    "security:audit:semgrep:json": "powershell -ExecutionPolicy Bypass -File ./scripts/run-semgrep.ps1 -Json"
   }
 }

@@ -4,22 +4,12 @@ import { BrandMark } from './BrandMark';
 
 const POLL_MS = 1500;
 const LCN_API_BASE = (import.meta.env.VITE_LCN_API_BASE_URL as string | undefined)?.replace(/\/$/, '') || 'http://localhost:8787';
-const APP_BACKEND_BASE = (import.meta.env.VITE_APP_BACKEND_URL as string | undefined)?.replace(/\/$/, '') || 'http://127.0.0.1:4000';
-const APP_FRONTEND_BASE = (import.meta.env.VITE_APP_FRONTEND_URL as string | undefined)?.replace(/\/$/, '') || 'http://localhost:5173';
 
 async function fetchJson<T>(url: string): Promise<T> {
   const res = await fetch(url);
   if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
   return (await res.json()) as T;
 }
-
-type GithubStatus = {
-  configured: boolean;
-  connected: boolean;
-  user: {
-    login?: string | null;
-  } | null;
-};
 
 function formatTime(value?: string | null) {
   if (!value) return '--';
@@ -56,12 +46,27 @@ function DetailList({ title, items }: { title: string; items: string[] }) {
   );
 }
 
+function getInitialRepoFilter() {
+  if (typeof window === 'undefined') return '';
+  return new URL(window.location.href).searchParams.get('repo')?.trim() ?? '';
+}
+
+function updateRepoInUrl(repo: string) {
+  if (typeof window === 'undefined') return;
+  const url = new URL(window.location.href);
+  if (repo) url.searchParams.set('repo', repo);
+  else url.searchParams.delete('repo');
+  window.history.replaceState({}, '', url);
+}
+
 export function App() {
   const [docs, setDocs] = useState<DocEntry[]>([]);
   const [health, setHealth] = useState<HealthResponse | null>(null);
-  const [github, setGithub] = useState<GithubStatus | null>(null);
+  const [backendReachable, setBackendReachable] = useState<boolean>(true);
   const [voteBusy, setVoteBusy] = useState<string | null>(null);
   const [selectedDocId, setSelectedDocId] = useState<string | null>(null);
+  const [repoFilter, setRepoFilter] = useState<string>(() => getInitialRepoFilter());
+  const [shareFeedback, setShareFeedback] = useState<string>('');
   const lastAudioPlayedFor = useRef<string | null>(null);
 
   async function vote(docId: string, direction: 'up' | 'down') {
@@ -82,6 +87,20 @@ export function App() {
     }
   }
 
+  async function copyShareLink() {
+    const repo = repoFilter || selectedDoc?.repo || '';
+    if (!repo || typeof window === 'undefined') return;
+    const url = new URL(window.location.href);
+    url.searchParams.set('repo', repo);
+    try {
+      await navigator.clipboard.writeText(url.toString());
+      setShareFeedback('Repo link copied');
+    } catch {
+      setShareFeedback(url.toString());
+    }
+    window.setTimeout(() => setShareFeedback(''), 2500);
+  }
+
   const latest = docs[0] ?? null;
   const selectedDoc = useMemo(() => {
     if (!docs.length) return null;
@@ -89,10 +108,12 @@ export function App() {
     return docs.find((doc) => doc.id === selectedDocId) ?? docs[0];
   }, [docs, selectedDocId]);
 
+  const activeRepo = useMemo(() => repoFilter || selectedDoc?.repo || '', [repoFilter, selectedDoc?.repo]);
+
   const timelineTitle = useMemo(() => {
-    if (!selectedDoc) return 'Waiting for saves...';
+    if (!selectedDoc) return activeRepo ? `Waiting for docs from ${activeRepo}...` : 'Waiting for saves...';
     return `${selectedDoc.filePath} | ${selectedDoc.summary}`;
-  }, [selectedDoc]);
+  }, [activeRepo, selectedDoc]);
 
   const totalVotes = useMemo(
     () => docs.reduce((sum, doc) => sum + doc.votes.up + doc.votes.down, 0),
@@ -106,37 +127,30 @@ export function App() {
   );
 
   useEffect(() => {
-    let cancelled = false;
-    const tick = async () => {
-      try {
-        const out = await fetchJson<{ ok: boolean; github: GithubStatus }>(`${APP_BACKEND_BASE}/api/github/status`);
-        if (!cancelled) setGithub(out.github);
-      } catch {
-        if (!cancelled) setGithub(null);
-      }
-    };
-    void tick();
-    const t = setInterval(() => void tick(), POLL_MS);
-    return () => {
-      cancelled = true;
-      clearInterval(t);
-    };
-  }, []);
+    updateRepoInUrl(repoFilter);
+  }, [repoFilter]);
 
   useEffect(() => {
     let cancelled = false;
-    if (!github?.connected) {
-      return;
-    }
     const tick = async () => {
       try {
         const h = await fetchJson<HealthResponse>(`${LCN_API_BASE}/health`);
-        if (!cancelled) setHealth(h);
+        if (!cancelled) {
+          setHealth(h);
+          setBackendReachable(true);
+        }
       } catch {
-        // ignore
+        if (!cancelled) {
+          setHealth(null);
+          setBackendReachable(false);
+        }
       }
+
       try {
-        const out = await fetchJson<{ ok: boolean; docs: DocEntry[] }>(`${LCN_API_BASE}/docs?limit=50`);
+        const docsUrl = new URL(`${LCN_API_BASE}/docs`);
+        docsUrl.searchParams.set('limit', '50');
+        if (repoFilter) docsUrl.searchParams.set('repo', repoFilter);
+        const out = await fetchJson<{ ok: boolean; docs: DocEntry[] }>(docsUrl.toString());
         if (!cancelled) {
           setDocs(out.docs ?? []);
           setSelectedDocId((current) => {
@@ -144,9 +158,14 @@ export function App() {
             if (current && out.docs.some((doc) => doc.id === current)) return current;
             return out.docs[0].id;
           });
+          setBackendReachable(true);
         }
       } catch {
-        // ignore
+        if (!cancelled) {
+          setDocs([]);
+          setSelectedDocId(null);
+          setBackendReachable(false);
+        }
       }
     };
     void tick();
@@ -155,7 +174,7 @@ export function App() {
       cancelled = true;
       clearInterval(t);
     };
-  }, [github?.connected]);
+  }, [repoFilter]);
 
   useEffect(() => {
     if (!latest) return;
@@ -171,35 +190,27 @@ export function App() {
     }
   }, [latest]);
 
-  if (!github?.connected) {
-    const loginUrl = new URL(`${APP_FRONTEND_BASE}/github-login`);
-    loginUrl.searchParams.set('autoconnect', '1');
-    loginUrl.searchParams.set('source', 'living-narrator');
-    loginUrl.searchParams.set('returnPath', '/');
-
+  if (!backendReachable) {
     return (
       <div className="shell shellLogin">
         <div className="ambient ambientLeft" />
         <div className="ambient ambientRight" />
         <section className="loginPanel">
           <BrandMark />
-          <div className="eyebrow">Extension handshake required</div>
-          <h1 className="loginTitle">Narration starts after GitHub sign-in.</h1>
+          <div className="eyebrow">Backend connection required</div>
+          <h1 className="loginTitle">Start the narrator backend to unlock the live stream.</h1>
           <p className="loginText">
-            This workspace shares the main app OAuth session. Open GitHub auth once, then the live doc stream unlocks here automatically.
+            This frontend now talks directly to the narrator backend in the same app group. Point it at a running API with
+            <code> VITE_LCN_API_BASE_URL</code> or use the default local address on <code>http://localhost:8787</code>.
           </p>
           <div className="promoGrid">
-            <FeatureCard title="Narrate on save" text="Every meaningful edit gets turned into a short explanation before context disappears." />
-            <FeatureCard title="Human-readable diffs" text="The feed keeps reasoning, summaries, tags, and playback in the same place." />
-            <FeatureCard title="Built for active repos" text="You can sign in once, leave it open, and let the memory layer build itself." />
+            <FeatureCard title="Repo sharing" text="Each generated doc now carries its repo and branch so collaborators can open the same stream." />
+            <FeatureCard title="One API base" text="The web dashboard, audio playback, votes, and repo feed all come from the same backend URL." />
+            <FeatureCard title="Render-ready" text="For deployment, set one public backend URL and share repo-filtered links with the team." />
           </div>
           <div className="loginActions">
-            <a className="primaryButton" href={loginUrl.toString()} target="_blank" rel="noreferrer">
-              Continue with GitHub
-            </a>
-            <span className={`statusChip ${github?.configured === false ? 'off' : 'warn'}`}>
-              {github?.configured === false ? 'OAuth not configured' : 'Waiting for sign-in'}
-            </span>
+            <span className="statusChip off">Backend offline</span>
+            <span className="statusChip neutral">{LCN_API_BASE}</span>
           </div>
         </section>
       </div>
@@ -220,25 +231,26 @@ export function App() {
             The narrator watches saves from the extension, drafts explanation blocks, and keeps the latest reasoning visible without waiting for a commit or pull request.
           </p>
           <div className="heroMeta">
-            <span className="statusChip on">GitHub {github?.user?.login || 'connected'}</span>
+            <span className="statusChip on">Backend connected</span>
             <span className={`statusChip ${docs.length ? 'on' : 'off'}`}>{docs.length} docs in feed</span>
             <span className={`statusChip ${selectedAudioUrl ? 'on' : 'warn'}`}>
               Audio {selectedAudioUrl ? 'ready' : 'fallback'}
             </span>
+            {activeRepo ? <span className="statusChip neutral">Repo {activeRepo}</span> : null}
           </div>
         </div>
 
         <div className="heroStats">
           <StatCard label="Latest file" value={selectedDoc?.language || '--'} detail={selectedDoc?.filePath || 'No document yet'} />
           <StatCard label="Published docs" value={String(publishedCount)} detail={selectedDoc ? `Updated ${formatDateTime(selectedDoc.updatedAt)}` : 'Waiting for save'} />
-          <StatCard label="Feedback" value={String(totalVotes)} detail="Total helpful and not-quite votes" />
+          <StatCard label="Feedback" value={String(totalVotes)} detail="Total helpful and flagged votes" />
         </div>
       </header>
 
       <section className="promoGrid">
-        <FeatureCard title="Extension to web" text="The same product mark now ties the VS Code surface, favicon, and dashboard together." />
-        <FeatureCard title="Readable by default" text="The homepage foregrounds summary quality, change context, and audio handoff instead of raw telemetry." />
-        <FeatureCard title="Made for demos" text="Login and empty states now feel intentional, which makes the product easier to explain in screenshots and walkthroughs." />
+        <FeatureCard title="Repo share links" text="Share a repo-specific URL so teammates in the same GitHub repo land on the same generated docs feed." />
+        <FeatureCard title="Thumbs-up and flag" text="Votes still hit the same doc IDs, so collaborators can rate accuracy from the shared repo stream." />
+        <FeatureCard title="Branch-aware context" text="Each saved entry carries repo and branch metadata, making the feed easier to audit across active work." />
       </section>
 
       <section className="statusStrip">
@@ -251,6 +263,30 @@ export function App() {
           value={health?.integrations.mongodb.configured ? (health.integrations.mongodb.connected ? 'connected' : 'fallback') : 'off'}
           tone={statusTone(health?.integrations.mongodb.configured, health?.integrations.mongodb.connected)}
         />
+      </section>
+
+      <section className="panel repoToolbar">
+        <div className="repoToolbarGroup">
+          <label className="detailBlockLabel" htmlFor="repoFilter">
+            Shared repo feed
+          </label>
+          <input
+            id="repoFilter"
+            className="repoInput"
+            value={repoFilter}
+            onChange={(event) => setRepoFilter(event.target.value.trim())}
+            placeholder="repo name, for example HackbyteProject"
+          />
+        </div>
+        <div className="repoToolbarActions">
+          <button type="button" className="softButton" onClick={() => setRepoFilter(selectedDoc?.repo ?? repoFilter)}>
+            Use current repo
+          </button>
+          <button type="button" className="softButton" disabled={!activeRepo} onClick={() => void copyShareLink()}>
+            Share repo link
+          </button>
+          {shareFeedback ? <span className="statusChip neutral">{shareFeedback}</span> : null}
+        </div>
       </section>
 
       <main className="workspace">
@@ -279,12 +315,16 @@ export function App() {
                   <div className="feedFile">{doc.filePath}</div>
                   <div className="feedSummary">{doc.summary}</div>
                   <div className="feedFooter">
-                    <span>{doc.status}</span>
+                    <span>{doc.repo || 'no repo'}</span>
                     <span>{doc.votes.up + doc.votes.down} votes</span>
                   </div>
                 </button>
               ))}
-              {docs.length === 0 ? <div className="emptyState">Save a file from the extension to start the narration stream.</div> : null}
+              {docs.length === 0 ? (
+                <div className="emptyState">
+                  {activeRepo ? `No docs found yet for repo ${activeRepo}. Save from the extension in that repo to publish a shared entry.` : 'Save a file from the extension to start the narration stream.'}
+                </div>
+              ) : null}
             </div>
           </section>
         </aside>
@@ -298,6 +338,8 @@ export function App() {
                   <h2 className="detailTitle">{selectedDoc.summary}</h2>
                   <div className="detailMetaRow">
                     <span className="miniChip">{selectedDoc.language}</span>
+                    {selectedDoc.repo ? <span className="miniChip">Repo {selectedDoc.repo}</span> : null}
+                    {selectedDoc.branch ? <span className="miniChip">Branch {selectedDoc.branch}</span> : null}
                     <span className="miniChip">Created {formatDateTime(selectedDoc.createdAt)}</span>
                     <span className="miniChip">Updated {formatDateTime(selectedDoc.updatedAt)}</span>
                   </div>
@@ -305,18 +347,18 @@ export function App() {
                 <div className="votePanel">
                   <div className="voteScore">
                     <span>{selectedDoc.votes.up}</span>
-                    <small>helpful</small>
+                    <small>thumbs up</small>
                   </div>
                   <div className="voteScore">
                     <span>{selectedDoc.votes.down}</span>
-                    <small>not quite</small>
+                    <small>flagged</small>
                   </div>
                   <div className="voteActions">
                     <button type="button" className="softButton" disabled={voteBusy !== null} onClick={() => void vote(selectedDoc.id, 'up')}>
-                      Helpful
+                      Thumbs up
                     </button>
                     <button type="button" className="softButton" disabled={voteBusy !== null} onClick={() => void vote(selectedDoc.id, 'down')}>
-                      Needs work
+                      Flag
                     </button>
                   </div>
                 </div>

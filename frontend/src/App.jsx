@@ -1,6 +1,31 @@
 import { useEffect, useState } from "react";
 
 const API_BASE = "http://localhost:4000";
+const API_TIMEOUT_MS = 8000;
+
+async function fetchJson(url, options = {}) {
+  const controller = new AbortController();
+  const timeoutId = window.setTimeout(() => controller.abort(), API_TIMEOUT_MS);
+
+  try {
+    const response = await fetch(url, {
+      ...options,
+      signal: controller.signal,
+    });
+    const data = await response.json();
+    if (!response.ok) {
+      throw new Error(data?.message || `Request failed with ${response.status}`);
+    }
+    return data;
+  } catch (error) {
+    if (error?.name === "AbortError") {
+      throw new Error(`Request timed out after ${API_TIMEOUT_MS / 1000}s`);
+    }
+    throw error;
+  } finally {
+    window.clearTimeout(timeoutId);
+  }
+}
 
 function getPreferredAiPercentage(source) {
   if (!source || typeof source !== "object") {
@@ -21,6 +46,7 @@ function getPreferredAiPercentage(source) {
 export default function App() {
   const [dashboard, setDashboard] = useState(null);
   const [aiStats, setAiStats] = useState(null);
+  const [dashboardError, setDashboardError] = useState("");
   const [connecting, setConnecting] = useState(false);
   const [simulating, setSimulating] = useState(false);
   const [githubMessage, setGithubMessage] = useState("");
@@ -28,15 +54,19 @@ export default function App() {
   const isGithubLoginPage = currentPath === "/github-login";
 
   async function loadDashboard() {
-    const response = await fetch(`${API_BASE}/api/dashboard`);
-    const data = await response.json();
-    setDashboard(data);
+    try {
+      const data = await fetchJson(`${API_BASE}/api/dashboard`);
+      setDashboard(data);
+      setDashboardError("");
+    } catch (error) {
+      console.error("Failed to load dashboard:", error);
+      setDashboardError(error.message || String(error));
+    }
   }
 
   async function loadAiStats() {
     try {
-      const response = await fetch(`${API_BASE}/api/ai-stats`);
-      const data = await response.json();
+      const data = await fetchJson(`${API_BASE}/api/ai-stats`);
       if (data.ok) {
         setAiStats(data);
       }
@@ -171,7 +201,24 @@ export default function App() {
   }
 
   if (!dashboard) {
-    return <div className="grid min-h-screen place-items-center bg-[#0b0d12] text-[#edf0fa]">Loading dashboard...</div>;
+    return (
+      <div className="grid min-h-screen place-items-center bg-[#0b0d12] px-6 text-[#edf0fa]">
+        <div className="max-w-md rounded-2xl border border-[#252c3e] bg-[#11141c] p-6 text-center shadow-[0_20px_60px_rgba(0,0,0,0.28)]">
+          <div className="font-mono text-[10px] uppercase tracking-[0.24em] text-[#4a5578]">Commit Confessional</div>
+          <div className="mt-4 text-lg">{dashboardError ? "Dashboard unavailable" : "Loading dashboard..."}</div>
+          <div className="mt-3 text-sm text-[#8492b4]">
+            {dashboardError || "Waiting for the backend API to respond."}
+          </div>
+          <button
+            type="button"
+            onClick={() => void loadDashboard()}
+            className="mt-5 rounded-lg border border-[#313a54] bg-[#0d1e3d] px-4 py-2 font-mono text-[11px] text-[#4d8eff] transition hover:border-[#4d8eff]/50"
+          >
+            Retry
+          </button>
+        </div>
+      </div>
+    );
   }
 
   const latestCapture = dashboard.captures[0];
@@ -350,6 +397,9 @@ export default function App() {
                         <div className="mt-2 flex flex-wrap gap-2">
                           <MiniChip tone="blu">{commit.ai?.method || "waiting for receipt"}</MiniChip>
                           <MiniChip tone={chipTone(commit.ai?.certainty)}>{commit.ai?.certainty || "unknown"}</MiniChip>
+                          {commit.ai?.model ? (
+                            <MiniChip tone="pur">{commit.ai.model}</MiniChip>
+                          ) : null}
                           <MiniChip tone="gry">
                             {commit.ai ? `${commit.ai.aiMatchedLines}/${commit.ai.totalChangedLines} matched` : "no diff score"}
                           </MiniChip>

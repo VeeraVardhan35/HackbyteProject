@@ -143,6 +143,11 @@
           "default": "http://localhost:8787",
           "description": "Narrator backend base URL."
         },
+        "lcn.webAppUrl": {
+          "type": "string",
+          "default": "",
+          "description": "Optional narrator web app URL used to share a repo-specific feed link."
+        },
         "lcn.debounceMs": {
           "type": "number",
           "default": 5000,

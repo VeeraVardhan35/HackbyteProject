@@ -143,21 +143,19 @@ const addedLinesPerSession = new Map(); // Track added lines per file during ses
 // === Sidebar UI Provider ===
 // Manages the webview sidebar that displays live code documentation and narrator snapshots
 class SidebarProvider {
-  static viewType = "lcn.sidebar"; // Unique identifier for this webview
+  static viewType = "lcn.sidebar";
 
   constructor(context) {
-    this.context = context; // Extension context for subscriptions
-    this.view = undefined; // Webview instance reference
-    this.lastDocsJson = "[]"; // Cache to detect documentation changes
-    this.pollTimer = undefined; // Timer for polling backend docs
+    this.context = context;
+    this.view = undefined;
+    this.lastDocsJson = "[]";
+    this.pollTimer = undefined;
   }
 
-  // Initialize webview when sidebar panel is created
   resolveWebviewView(view) {
     this.view = view;
-    view.webview.options = { enableScripts: true }; // Enable JavaScript in webview
-    view.webview.html = this.renderHtml(view.webview); // Render UI with CSP headers
-    // Handle messages from webview (file opens, votes)
+    view.webview.options = { enableScripts: true };
+    view.webview.html = this.renderHtml(view.webview);
     view.webview.onDidReceiveMessage(async (msg) => {
       if (msg?.type === "openFile" && typeof msg.filePath === "string") {
         try {
@@ -166,12 +164,10 @@ class SidebarProvider {
         } catch (error) {
           log(`openFile failed: ${error?.message || String(error)}`);
         }
+        return;
       }
-      if (
-        msg?.type === "vote" &&
-        typeof msg.id === "string" &&
-        (msg.direction === "up" || msg.direction === "down")
-      ) {
+
+      if (msg?.type === "vote" && typeof msg.id === "string" && (msg.direction === "up" || msg.direction === "down")) {
         const cfg = getNarratorConfig();
         try {
           await fetchJson(`${trimSlash(cfg.backendUrl)}/docs/${msg.id}/vote`, {
@@ -179,39 +175,80 @@ class SidebarProvider {
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({ direction: msg.direction }),
           });
+          await this.fetchDocsNow();
         } catch (error) {
           log(`vote failed: ${error?.message || String(error)}`);
         }
+        return;
+      }
+
+      if (msg?.type === "shareRepo") {
+        const cfg = getNarratorConfig();
+        const repoContext = await getNarratorRepoContext();
+        if (!repoContext.repo) {
+          void vscode.window.showWarningMessage("LCN: no repo detected for sharing.");
+          return;
+        }
+
+        if (cfg.webAppUrl) {
+          try {
+            const shareUrl = new URL(cfg.webAppUrl);
+            shareUrl.searchParams.set("repo", repoContext.repo);
+            await vscode.env.clipboard.writeText(shareUrl.toString());
+            void vscode.window.showInformationMessage(`LCN: copied share link for ${repoContext.repo}`);
+          } catch (error) {
+            log(`shareRepo failed: ${error?.message || String(error)}`);
+          }
+          return;
+        }
+
+        await vscode.env.clipboard.writeText(repoContext.repo);
+        void vscode.window.showInformationMessage(`LCN: copied repo name ${repoContext.repo}`);
       }
     });
+
     this.startPolling();
   }
 
-  notifyDocs(docs) {
+  notifyDocs(docs, meta = {}) {
     this.lastDocsJson = JSON.stringify(docs);
-    this.view?.webview.postMessage({ type: "docs", docs });
+    this.view?.webview.postMessage({ type: "docs", docs, ...meta });
+  }
+
+  async fetchDocsNow() {
+    const cfg = getNarratorConfig();
+    try {
+      const repoContext = await getNarratorRepoContext();
+      const docsUrl = new URL(`${trimSlash(cfg.backendUrl)}/docs`);
+      docsUrl.searchParams.set("limit", "25");
+      if (repoContext.repo) docsUrl.searchParams.set("repo", repoContext.repo);
+      const payload = await fetchJson(docsUrl.toString());
+      const docs = Array.isArray(payload.docs) ? payload.docs : [];
+      const next = JSON.stringify(docs);
+      if (next !== this.lastDocsJson) {
+        this.notifyDocs(docs, {
+          repo: repoContext.repo,
+          branch: repoContext.branch,
+          shareEnabled: Boolean(cfg.webAppUrl),
+        });
+      } else {
+        this.view?.webview.postMessage({
+          type: "meta",
+          repo: repoContext.repo,
+          branch: repoContext.branch,
+          shareEnabled: Boolean(cfg.webAppUrl),
+        });
+      }
+    } catch {
+      // ignore polling errors in sidebar
+    }
   }
 
   startPolling() {
-    const poll = async () => {
-      const cfg = getNarratorConfig();
-      try {
-        const payload = await fetchJson(`${trimSlash(cfg.backendUrl)}/docs?limit=25`);
-        const docs = Array.isArray(payload.docs) ? payload.docs : [];
-        const next = JSON.stringify(docs);
-        if (next !== this.lastDocsJson) {
-          this.lastDocsJson = next;
-          this.view?.webview.postMessage({ type: "docs", docs });
-        }
-      } catch {}
-    };
-    void poll();
-    this.pollTimer = setInterval(() => void poll(), 1500);
+    void this.fetchDocsNow();
+    this.pollTimer = setInterval(() => void this.fetchDocsNow(), 1500);
     this.context.subscriptions.push({ dispose: () => this.pollTimer && clearInterval(this.pollTimer) });
   }
-
-//dfsldfjlskdjflksdjflksjf
-
 
   renderHtml(webview) {
     const nonce = crypto.randomBytes(16).toString("base64");
@@ -295,30 +332,36 @@ class SidebarProvider {
           <span class="ok">SpacetimeDB ready</span>
           <span class="strong">VS Code extension active</span>
           <span id="doc-count">0 docs</span>
+          <span id="repo-label">repo unknown</span>
           <span style="margin-left:auto" id="active-file">waiting for save</span>
         </div>
       </div>
       <script nonce="${nonce}">
-        const vscode = acquireVsCodeApi(); let docs = []; let active = "docs"; const votes = new Map();
+        const vscode = acquireVsCodeApi(); let docs = []; let active = "docs"; let repo = ""; let branch = "";
         const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;" }[c]));
         const tail = (s) => { s = String(s || ""); const i = Math.max(s.lastIndexOf("/"), s.lastIndexOf(String.fromCharCode(92))); return i >= 0 ? s.slice(i + 1) : s; };
         const initials = (s) => String(s || "?").split(/\\s+/).filter(Boolean).slice(0, 2).map((p) => p[0]?.toUpperCase() || "").join("");
         const relTime = (value) => { if(!value) return "just now"; const date = new Date(value); if(Number.isNaN(date.getTime())) return String(value); const diff = Math.max(0, Math.round((Date.now() - date.getTime()) / 60000)); if(diff < 1) return "just now"; if(diff < 60) return diff + " min ago"; if(diff < 1440) return Math.round(diff / 60) + " hr ago"; return Math.round(diff / 1440) + " d ago"; };
         const tagTone = (index) => index % 2 === 0 ? "pur" : "grn";
         function setTab(name){ active = name; document.querySelectorAll(".tab").forEach((b)=>b.classList.toggle("active", b.dataset.tab===name)); document.querySelectorAll(".panel").forEach((p)=>p.classList.toggle("active", p.id===name)); }
+        function syncMeta(latest){
+          document.getElementById("doc-count").textContent = docs.length + " docs";
+          document.getElementById("active-file").textContent = latest?.filePath ? tail(latest.filePath) : "waiting for save";
+          document.getElementById("repo-label").textContent = repo ? (branch ? repo + "@" + branch : repo) : "repo unknown";
+        }
         function render(){
           const files = [...new Set(docs.map((d)=>d.filePath).filter(Boolean))];
           const latest = docs[0];
-          document.getElementById("doc-count").textContent = docs.length + " docs";
-          document.getElementById("active-file").textContent = latest?.filePath ? tail(latest.filePath) : "waiting for save";
+          syncMeta(latest);
           document.getElementById("explorer").innerHTML = '<div class="frame"><div class="explorer"><div class="explabel">Explorer</div>' + (files.map((fp, index)=>'<div class="file'+(index===0?' active':'')+'" data-fp="'+esc(fp)+'">'+esc(tail(fp))+'</div>').join("") || '<div class="empty" style="margin:0 10px">No docs yet</div>') + '</div><div class="editor"><div class="editor-meta"><span>Tracked files</span><span class="editor-chip">'+files.length+' items</span></div><pre>' + esc(files.join("\\n") || "Save a file to populate explorer state.") + '</pre></div></div>';
-          document.querySelectorAll(".file").forEach((el)=>el.onclick=()=>vscode.postMessage({type:"openFile", filePath:el.dataset.fp}));
+          document.querySelectorAll(".file[data-fp]").forEach((el)=>el.onclick=()=>vscode.postMessage({type:"openFile", filePath:el.dataset.fp}));
           document.getElementById("editor").innerHTML = latest ? '<div class="frame"><div class="explorer"><div class="explabel">Context</div><div class="file active">'+esc(tail(latest.filePath || "unknown"))+'</div><div class="file">'+esc(latest.language || "text")+'</div><div class="file">'+esc(relTime(latest.createdAt))+'</div></div><div class="editor"><div class="editor-meta"><span>'+esc(latest.language || "text")+'</span><span class="editor-chip">'+esc(tail(latest.filePath || "unknown"))+'</span></div><pre>'+esc(latest.diff || "")+'</pre></div></div>' : '<div class="docs-wrap"><div class="empty">Save a file to generate a diff.</div></div>';
-          document.getElementById("docs").innerHTML = '<div class="docs-wrap"><div class="voicebar"><div class="vwave"><div class="vbar" style="--d:.35s"></div><div class="vbar" style="--d:.5s"></div><div class="vbar" style="--d:.25s"></div><div class="vbar" style="--d:.45s"></div><div class="vbar" style="--d:.3s"></div></div><div class="vtxt">' + esc(latest?.summary || "Waiting for the next narrated code update...") + '</div></div>' + (docs.map((d, index)=>'<div class="card'+(index===0?' new':'')+'"><div class="meta"><div class="avatar">'+esc(initials(d.author || "dev"))+'</div><div class="name">'+esc(d.author || "Developer")+'</div><div class="time">'+esc(relTime(d.createdAt))+'</div></div><div class="fileline">'+esc(tail(d.filePath || "unknown"))+' | '+esc(d.language || "text")+'</div><div class="summary">'+esc(d.summary || "")+'</div><div class="tags">'+((d.tags||[]).map((t, tagIndex)=>'<span class="tag '+tagTone(tagIndex)+'">#'+esc(t)+'</span>').join(""))+'</div><div class="actions"><span style="font-size:9px;color:var(--muted)">Accurate?</span><button class="btn good" data-id="'+esc(d.id)+'" data-dir="up">thumbs up</button><button class="btn bad" data-id="'+esc(d.id)+'" data-dir="down">flag</button></div></div>').join("") || '<div class="empty">Waiting for live docs.</div>') + '</div>';
+          document.getElementById("docs").innerHTML = '<div class="docs-wrap"><div class="voicebar"><div class="vwave"><div class="vbar" style="--d:.35s"></div><div class="vbar" style="--d:.5s"></div><div class="vbar" style="--d:.25s"></div><div class="vbar" style="--d:.45s"></div><div class="vbar" style="--d:.3s"></div></div><div class="vtxt">' + esc(latest?.summary || "Waiting for the next narrated code update...") + '</div></div>' + (docs.map((d, index)=>'<div class="card'+(index===0?' new':'')+'"><div class="meta"><div class="avatar">'+esc(initials(d.author || "dev"))+'</div><div class="name">'+esc(d.author || "Developer")+'</div><div class="time">'+esc(relTime(d.createdAt))+'</div></div><div class="fileline">'+esc(tail(d.filePath || "unknown"))+' | '+esc(d.language || "text")+'</div><div class="summary">'+esc(d.summary || "")+'</div><div class="tags">'+((d.tags||[]).map((t, tagIndex)=>'<span class="tag '+tagTone(tagIndex)+'">#'+esc(t)+'</span>').join(""))+'</div><div class="actions"><span style="font-size:9px;color:var(--muted)">'+esc(d.repo || repo || "repo unknown")+(d.branch ? ' | '+esc(d.branch) : '')+'</span><button class="btn good" data-id="'+esc(d.id)+'" data-dir="up">thumbs up</button><button class="btn bad" data-id="'+esc(d.id)+'" data-dir="down">flag</button></div></div>').join("") || '<div class="empty">Waiting for live docs.</div>') + '</div>';
           document.querySelectorAll(".btn[data-id]").forEach((el)=>el.onclick=()=>vscode.postMessage({type:"vote", id:el.dataset.id, direction:el.dataset.dir}));
         }
-        window.addEventListener("message",(e)=>{ if(e.data?.type==="docs"){ docs = Array.isArray(e.data.docs) ? e.data.docs : []; render(); } });
-        document.querySelectorAll(".tab").forEach((b)=>b.onclick=()=>setTab(b.dataset.tab)); render();
+        window.addEventListener("message",(e)=>{ if(e.data?.type==="docs"){ docs = Array.isArray(e.data.docs) ? e.data.docs : []; repo = String(e.data.repo || ""); branch = String(e.data.branch || ""); render(); } if(e.data?.type==="meta"){ repo = String(e.data.repo || repo || ""); branch = String(e.data.branch || branch || ""); syncMeta(docs[0]); } });
+        document.querySelectorAll(".tab").forEach((b)=>b.onclick=()=>setTab(b.dataset.tab));
+        render();
       </script></body></html>`;
   }
 }
@@ -638,9 +681,12 @@ async function handleNarratorSave(doc, sidebar) {
   // Delay sending delta to batch rapid edits (debouncing)
   const timer = setTimeout(async () => {
     narratorPending.delete(fsPath);
+    const repoContext = await getNarratorRepoContext(fsPath);
     const payload = {
       sessionId: DEFAULT_SESSION_ID,
       author: vscode.env.machineId ? `dev-${vscode.env.machineId.slice(0, 6)}` : "dev",
+      repo: repoContext.repo,
+      branch: repoContext.branch || undefined,
       filePath: fsPath,
       language: doc.languageId,
       diff,
@@ -654,7 +700,9 @@ async function handleNarratorSave(doc, sidebar) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
       });
-      if (response?.doc) sidebar.notifyDocs([response.doc]);
+      if (response?.doc) {
+        await sidebar.fetchDocsNow();
+      }
       log(`LCN delta sent: ${fsPath}`);
     } catch (error) {
       log(`LCN delta failed: ${error?.message || String(error)}`);
@@ -1108,10 +1156,40 @@ function getNarratorConfig() {
   const cfg = vscode.workspace.getConfiguration("lcn");
   return {
     backendUrl: cfg.get("backendUrl", "http://localhost:8787"), // LCN backend endpoint
+    webAppUrl: cfg.get("webAppUrl", ""), // Optional web app for repo share links
     debounceMs: cfg.get("debounceMs", 5000), // Debounce time for code changes
     minChangedLines: cfg.get("minChangedLines", 1), // Minimum changed lines to trigger narrator
     ignoreGlobs: cfg.get("ignoreGlobs", ["**/node_modules/**", "**/dist/**", "**/build/**", "**/.git/**", "**/*.map", "**/*lock*.json"]), // Patterns to ignore
   };
+}
+
+function normalizeRepoNameFromRemote(remoteUrl, fallbackPath) {
+  const cleaned = String(remoteUrl || "").trim().replace(/\.git$/i, "");
+  if (!cleaned) {
+    return path.basename(String(fallbackPath || ""));
+  }
+  const slashIndex = Math.max(cleaned.lastIndexOf("/"), cleaned.lastIndexOf(":"));
+  return slashIndex >= 0 ? cleaned.slice(slashIndex + 1) : cleaned;
+}
+
+async function getNarratorRepoContext(targetPath = null) {
+  const repoRoot = targetPath ? findGitRootForPath(targetPath) : getPreferredRepoRoot();
+  if (!repoRoot) {
+    return { repo: "", branch: "" };
+  }
+
+  try {
+    const [remoteUrl, branch] = await Promise.all([
+      runGit(["remote", "get-url", "origin"], repoRoot).catch(() => ""),
+      runGit(["rev-parse", "--abbrev-ref", "HEAD"], repoRoot).catch(() => ""),
+    ]);
+    return {
+      repo: normalizeRepoNameFromRemote(String(remoteUrl || "").trim(), repoRoot),
+      branch: String(branch || "").trim(),
+    };
+  } catch {
+    return { repo: path.basename(repoRoot), branch: "" };
+  }
 }
 
 // Check if file path should be ignored by narrator

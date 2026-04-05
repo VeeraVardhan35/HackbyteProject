@@ -7,7 +7,7 @@ import { z } from 'zod';
 import type { CodeDelta, DocEntry, HealthResponse } from '@lcn/types';
 import { env } from './env.js';
 import { appendJsonl, readJsonl, ensureDir } from './storage/localStore.js';
-import { findLatestDocById, mergeLatestDocsById } from './docsMerge.js';
+import { filterDocsByRepo, findLatestDocById, mergeLatestDocsById } from './docsMerge.js';
 import { generateDocsWithGemini, isGeminiConfigured, isHuggingFaceConfigured, llmState } from './integrations/gemini.js';
 import { isElevenLabsConfigured, synthesizeHeadingAudio } from './integrations/elevenlabs.js';
 import { fallbackDocFromDiff } from './fallback.js';
@@ -99,7 +99,8 @@ app.get('/health', async (_req, res) => {
 app.get('/docs', async (req, res) => {
   const limit = Math.min(Number(req.query.limit ?? 50), 500);
   const all = await readDocsEntries();
-  const merged = mergeLatestDocsById(all);
+  const repo = typeof req.query.repo === 'string' ? req.query.repo : '';
+  const merged = filterDocsByRepo(mergeLatestDocsById(all), repo);
   res.json({ ok: true, docs: merged.slice(0, limit) });
 });
 
@@ -163,6 +164,8 @@ app.post('/deltas', async (req, res) => {
     deltaId: delta.id,
     sessionId: delta.sessionId,
     author: delta.author,
+    repo: delta.repo,
+    branch: delta.branch,
     filePath: delta.filePath,
     language: delta.language,
     lines: null,

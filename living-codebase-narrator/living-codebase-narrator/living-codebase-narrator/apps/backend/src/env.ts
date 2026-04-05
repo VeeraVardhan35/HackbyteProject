@@ -14,11 +14,11 @@ for (const filePath of envCandidates) {
 }
 
 export const env = {
-  PORT: Number(process.env.PORT ?? process.env.LCN_PORT ?? process.env.NARRATOR_PORT ?? '8787'),
+  PORT: Number(process.env.LCN_PORT ?? process.env.NARRATOR_PORT ?? '8787'),
   PUBLIC_BASE_URL:
     process.env.LCN_PUBLIC_BASE_URL ??
     process.env.NARRATOR_PUBLIC_BASE_URL ??
-    `http://localhost:${process.env.PORT ?? process.env.LCN_PORT ?? process.env.NARRATOR_PORT ?? '8787'}`,
+    `http://localhost:${process.env.LCN_PORT ?? process.env.NARRATOR_PORT ?? '8787'}`,
   LOCAL_DATA_DIR: process.env.LCN_LOCAL_DATA_DIR ?? process.env.NARRATOR_LOCAL_DATA_DIR ?? '.data',
 
   GEMINI_API_KEY: process.env.GEMINI_API_KEY ?? '',

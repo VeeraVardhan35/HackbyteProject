@@ -85,6 +85,7 @@ const state = {
   github: await loadGithubSession(),
   githubStates: new Map(),
 };
+let latestReceiptRefreshPromise = null;
 
 if (state.latestReceipt && !normalizeCommitHash(state.latestReceipt.commitHash)) {
   state.latestPreviewReceipt = state.latestReceipt;
@@ -98,10 +99,8 @@ state.proxy.healthy = state.captures.length > 0;
 state.recentCommits = await buildRecentCommitFeed();
 
 app.get("/api/health", async (_req, res) => {
-  await refreshRepoContextIfNeeded(true);
-  state.latestCommit = await createLatestCommitSnapshot(projectRoot);
-  await ensureLatestCommitReceipt();
-  state.recentCommits = await buildRecentCommitFeed();
+  void refreshDashboardState(true);
+  triggerLatestCommitReceiptRefresh();
   state.proxy.lastHealthCheckAt = new Date().toISOString();
 
   res.json({
@@ -135,11 +134,8 @@ app.get("/api/health", async (_req, res) => {
 });
 
 app.get("/api/proxy/status", async (_req, res) => {
-  await refreshRepoContextIfNeeded(true);
-  state.latestCommit = await createLatestCommitSnapshot(projectRoot);
-  await ensureLatestCommitReceipt();
-  state.recentCommits = await buildRecentCommitFeed();
-
+  void refreshDashboardState(true);
+  triggerLatestCommitReceiptRefresh();
   res.json({
     proxy: state.proxy,
     simulationProxy: {
@@ -209,11 +205,8 @@ app.all("/proxy/:provider/*", async (req, res) => {
 });
 
 app.get("/api/dashboard", async (_req, res) => {
-  await refreshRepoContextIfNeeded(true);
-  state.latestCommit = await createLatestCommitSnapshot(projectRoot);
-  await ensureLatestCommitReceipt();
-  state.recentCommits = await buildRecentCommitFeed();
-
+  void refreshDashboardState(true);
+  triggerLatestCommitReceiptRefresh();
   res.json({
     proxy: state.proxy,
     repo: state.repoContext.summary,
@@ -750,16 +743,17 @@ async function buildRecentCommitFeed() {
     const copilot = receipt?.copilotContribution ?? receipt?.modelEvidence?.copilotContribution ?? null;
     const commitWindow = receipt?.commitWindow ?? null;
 
-    return {
-      ...commit,
-      ai: contribution
-        ? {
+      return {
+        ...commit,
+        ai: contribution
+          ? {
             estimatedAiPercentage: contribution.estimatedAiPercentage,
             narratorEstimatedAiPercentage: receipt?.localAiShare?.aiPct ?? null,
             aiMatchedLines: contribution.aiMatchedLines,
             totalChangedLines: contribution.totalChangedLines,
             certainty: receipt?.modelEvidence?.certainty ?? "UNKNOWN",
             method: receipt?.modelEvidence?.method ?? null,
+            model: receipt?.modelEvidence?.model ?? null,
             updatedAt: receipt?.updatedAt ?? null,
             logEventCount: copilot?.eventCount ?? 0,
           }
@@ -821,6 +815,28 @@ async function ensureLatestCommitReceipt() {
   } catch (error) {
     console.warn(`Failed to auto-generate latest commit receipt for ${commitHash}`, error?.message || error);
   }
+}
+
+async function refreshDashboardState(force = false) {
+  await refreshRepoContextIfNeeded(force);
+  state.latestCommit = await createLatestCommitSnapshot(projectRoot);
+  state.recentCommits = await buildRecentCommitFeed();
+}
+
+function triggerLatestCommitReceiptRefresh() {
+  if (latestReceiptRefreshPromise) {
+    return latestReceiptRefreshPromise;
+  }
+
+  latestReceiptRefreshPromise = ensureLatestCommitReceipt()
+    .catch((error) => {
+      console.warn("Background latest commit receipt refresh failed", error?.message || error);
+    })
+    .finally(() => {
+      latestReceiptRefreshPromise = null;
+    });
+
+  return latestReceiptRefreshPromise;
 }
 
 function mergeCommitSources(localCommits = [], githubCommits = [], limit = 12) {

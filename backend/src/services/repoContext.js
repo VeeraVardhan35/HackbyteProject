@@ -147,10 +147,24 @@ async function readFileIndex(projectRoot) {
 }
 
 async function walk(root, current, files) {
-  const entries = await fs.readdir(current, { withFileTypes: true });
+  let entries = [];
+  try {
+    entries = await fs.readdir(current, { withFileTypes: true });
+  } catch (error) {
+    if (error?.code === "EPERM" || error?.code === "EACCES") {
+      return;
+    }
+    throw error;
+  }
 
   for (const entry of entries) {
-    if (entry.name === ".git" || entry.name === "node_modules" || entry.name === "dist") {
+    if (
+      entry.name === ".git" ||
+      entry.name === "node_modules" ||
+      entry.name === "dist" ||
+      entry.name === "security-reports" ||
+      entry.name === "run-logs"
+    ) {
       continue;
     }
 

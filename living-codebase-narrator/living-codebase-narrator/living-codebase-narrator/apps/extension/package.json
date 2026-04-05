@@ -55,6 +55,11 @@
           "default": "http://localhost:8787",
           "description": "Backend base URL."
         },
+        "lcn.webAppUrl": {
+          "type": "string",
+          "default": "",
+          "description": "Optional public web app URL used to copy a repo share link for teammates."
+        },
         "lcn.debounceMs": {
           "type": "number",
           "default": 5000,

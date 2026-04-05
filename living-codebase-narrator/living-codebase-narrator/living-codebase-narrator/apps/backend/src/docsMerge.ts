@@ -24,3 +24,9 @@ export function findLatestDocById(rows: DocEntry[], id: string): DocEntry | unde
   }
   return best;
 }
+
+export function filterDocsByRepo(rows: DocEntry[], repo?: string | null): DocEntry[] {
+  const wanted = String(repo ?? '').trim().toLowerCase();
+  if (!wanted) return rows;
+  return rows.filter((row) => String(row.repo ?? '').trim().toLowerCase() === wanted);
+}

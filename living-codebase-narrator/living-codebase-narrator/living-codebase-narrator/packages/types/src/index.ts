@@ -23,6 +23,8 @@ export type DocEntry = {
   deltaId: string;
   sessionId: string;
   author: string;
+  repo?: string;
+  branch?: string;
   filePath: string;
   language: string;
   lines: { start: number; end: number } | null;
